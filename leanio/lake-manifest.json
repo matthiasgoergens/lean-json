@@ -5,7 +5,7 @@
    "type": "git",
    "subDir": null,
    "scope": "",
-   "rev": "c98f0a91376d1de033575c4ed48afc35764c7080",
+   "rev": "e13e8bc0b07d047d8ab0ee35687e5f316f3f24a0",
    "name": "leanio",
    "manifestFile": "lake-manifest.json",
    "inputRev": "json2",
