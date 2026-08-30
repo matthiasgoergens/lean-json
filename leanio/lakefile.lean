@@ -6,7 +6,7 @@ import Lake
 open Lake DSL
 
 package leanioJson where
-  version := v!"0.2.0"
+  version := v!"0.2.1"
   leanOptions := #[⟨`warningAsError, true⟩]
 
 require json from ".."
