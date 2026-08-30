@@ -209,6 +209,17 @@ surrogate code point, which is where D8 becomes a property of the alphabet rathe
 imposed on the grammar.
 -/
 
+/--
+Whitespace stops at the first character that is not whitespace. Every proof that the grammar
+refuses a text begins by pinning down where its leading whitespace ends, and without this `Ws`
+could be read as skipping over a `[` or a `,`, leaving no text the grammar demonstrably rejects.
+
+`hc : isWs c = false` says `c` is none of space, tab, line feed or carriage return. Given a
+derivation `Ws (c :: s) r`, which says whitespace consumed some prefix of `c :: s` and left `r`,
+the conclusion `r = c :: s` says it consumed nothing. `Ws` has two constructors: `nil` gives that
+conclusion outright, and `cons`, the one that would consume `c`, requires `isWs c = true` and so
+contradicts `hc`.
+-/
 theorem ws_eq_of_not_isWs {c : Char} {s r : List Char} (hc : isWs c = false) :
     Ws (c :: s) r → r = c :: s := by
   intro h
@@ -216,6 +227,16 @@ theorem ws_eq_of_not_isWs {c : Char} {s r : List Char} (hc : isWs c = false) :
   | nil => rfl
   | cons hws _ => rw [hc] at hws; exact absurd hws (by decide)
 
+/--
+A structural character cannot be found where the text begins with a different character that is
+not whitespace. This is the whole of what rejection proofs need about `[`, `]`, `{`, `}`, `:` and
+`,`: no derivation can read a `,` where the grammar calls for a `:`.
+
+`hc` says the leading character `c` is not whitespace and `hne` says it is not the token `t` being
+sought. `¬ Token t (c :: s) r` denies that any derivation exists, for any remainder `r`.
+`Token t` is whitespace, then `t`, then whitespace; `ws_eq_of_not_isWs` says the leading
+whitespace consumes nothing, so the `t` would have to be `c` itself, which `hne` forbids.
+-/
 theorem not_token_of_ne {t c : Char} {s r : List Char} (hc : isWs c = false) (hne : c ≠ t) :
     ¬ Token t (c :: s) r := by
   rintro ⟨hws, -⟩
@@ -223,13 +244,32 @@ theorem not_token_of_ne {t c : Char} {s r : List Char} (hc : isWs c = false) (hn
   simp at this
   exact hne this.1.symm
 
-/-- No character carries a surrogate code point. -/
+/--
+No `Char` carries a surrogate code point. This is why the grammar can be written over `Char` and
+still enforce RFC 8259's rule that an unpaired surrogate escape denotes no character: the rule
+falls out of the alphabet rather than being a side condition every production has to repeat.
+
+`c.toNat` is `c`'s code point as a number. `c.toNat < 0xD800 ∨ 0xDFFF < c.toNat` places it below
+or above the surrogate block `D800`-`DFFF`, so never inside it. It is read off `Char.valid`, the
+invariant carried by every `Char`, so it holds of every character with no exception.
+-/
 theorem char_not_surrogate (c : Char) : c.toNat < 0xD800 ∨ 0xDFFF < c.toNat := by
   have h := c.valid
   simp only [UInt32.isValidChar, Nat.isValidChar] at h
   simp only [Char.toNat]
   omega
 
+/--
+A `\u` escape that names a character names one outside the surrogate block. This is the form in
+which the alphabet's guarantee is used: the grammar relates an escape to a character by their
+numbers, and this says that number cannot be a surrogate, which leaves the paired rule as the only
+way to write one.
+
+`hval : c.toNat = v` says `v` is the code point of some actual character `c`, which is where all
+the content lies: `v` on its own is an arbitrary natural number. Given that, the conclusion
+`v < 0xD800 ∨ 0xDFFF < v` places `v` outside `D800`-`DFFF`, and it is `char_not_surrogate c`
+carried along `hval`.
+-/
 theorem escape_not_surrogate {v : Nat} {c : Char} (hval : c.toNat = v) :
     v < 0xD800 ∨ 0xDFFF < v := by
   have := char_not_surrogate c

@@ -285,37 +285,111 @@ an integer whose canonical form needs more padding than the bound allows cannot 
 exactly when its elements do.
 -/
 
+/--
+A `Json` value encoded and decoded again is the value it was. The instances for `Json` itself are
+the identity pair, and recording that is what lets `Json` be used as a field type inside a derived
+codec without any special case being made for it.
+
+`toJson j` is `j` and `fromJson? j` is `.ok j`, so the equation holds by `rfl` for every value,
+however deeply nested. There is no hypothesis, and none of the other round trips in this section
+is appealed to, since no value of another type is involved.
+-/
 theorem json_roundTrip (j : Json) : (fromJson? (toJson j) : Except String Json) = .ok j := rfl
 
+/--
+A number encoded and decoded again is the number it was, with no normalisation on the way. A
+caller can build a number the parser would never produce, one that is not canonical, and this says
+such a value comes back as written rather than being quietly changed by the codec.
+
+`toJson n` wraps `n` in the `num` constructor and `fromJson?` is `getNum?`, which unwraps it, so
+the equation holds by `rfl`. Nothing inspects the mantissa or the exponent, which is why no
+canonicity hypothesis appears.
+-/
 theorem number_roundTrip (n : Number) : (fromJson? (toJson n) : Except String Number) = .ok n :=
   rfl
 
+/--
+A boolean encoded and decoded again is the boolean it was. It is the simplest claim in this
+section and one of the few that holds with no hypothesis at all, which is worth saying plainly
+because most of the others are conditional.
+
+`toJson b` wraps `b` in the `bool` constructor and `fromJson?` is `getBool?`, which unwraps it, so
+the equation holds by `rfl` for both values of `Bool`.
+-/
 theorem bool_roundTrip (b : Bool) : (fromJson? (toJson b) : Except String Bool) = .ok b := rfl
 
+/--
+A string encoded and decoded again is the string it was. Escaping belongs to the printer and not
+to the codec, so nothing here inspects the characters, and no code point can be lost or altered
+between encoding and decoding.
+
+`toJson s` wraps `s` in the `str` constructor and `fromJson?` is `getStr?`, which unwraps it, so
+the equation holds by `rfl` for every string, whatever characters it holds.
+-/
 theorem string_roundTrip (s : String) : (fromJson? (toJson s) : Except String String) = .ok s :=
   rfl
 
+/--
+The unit value encoded and decoded again is the unit value. It is encoded as the empty object, and
+this says the decoder accepts exactly that, which is what makes a derived codec for a constructor
+with no fields read back.
+
+`toJson ()` is `obj #[]`, and the decoder matches that pattern alone: an object with any field at
+all is an error rather than a unit. The equation holds by `rfl`, and there is nothing to quantify
+over, `Unit` having one value.
+-/
 theorem unit_roundTrip : (fromJson? (toJson ()) : Except String Unit) = .ok () := rfl
 
 /--
-An integer survives the trip whenever writing it out again stays within the padding bound, which
-excludes only those whose canonical form is a short mantissa followed by more than a thousand
-zeros.
+An integer encoded and decoded again is the integer it was, whenever writing it out stays within
+the padding bound. That bound exists because a short text can otherwise ask for an integer of a
+billion digits, and this says the price is paid only by integers that are themselves enormous.
+
+`h : (Number.ofInt i).exponent ≤ 1000` is the padding condition, and it is not vacuous:
+`Number.le_exponent_normalizeAux` puts that exponent at the number of `i`'s trailing zeros, so the
+only integers it excludes are those ending in more than a thousand of them. The conclusion says
+decoding the encoding yields `.ok i`, the integer itself rather than something numerically equal
+to it.
 -/
 theorem int_roundTrip {i : Int} (h : (Number.ofInt i).exponent ≤ 1000) :
     (fromJson? (toJson i) : Except String Int) = .ok i := by
   simp [toJson, fromJson?, getInt?, Number.toInt?_ofInt h]
 
+/--
+A natural number encoded and decoded again is the natural number it was, under the same padding
+condition as an integer. The decoder adds a sign check to the integer one, and this says that
+check never rejects a value that was non-negative to begin with.
+
+`h : (Number.ofNat n).exponent ≤ 1000` again bounds the trailing zeros of the encoded number, so
+it excludes only naturals ending in more than a thousand of them. The conclusion is `.ok n`. It
+rests on `Number.toNat?_ofNat`, whose one step beyond the integer case is that `n` is non-negative
+and so survives the extra check.
+-/
 theorem nat_roundTrip {n : Nat} (h : (Number.ofNat n).exponent ≤ 1000) :
     (fromJson? (toJson n) : Except String Nat) = .ok n := by
   simp [toJson, fromJson?, getNat?, Number.toNat?_ofNat h]
 
+/--
+`none` encoded and decoded again is `none`. It holds for any element type whatever, including one
+whose own values do not round trip, since no value of that type takes part.
+
+`toJson (none : Option α)` is `Json.null`, and `optionFromJson?` answers `.ok none` on exactly
+that constructor, so the equation holds by `rfl`. The instances for `α` have to exist for the
+statement to typecheck but are never called.
+-/
 theorem option_none_roundTrip {α : Type} [ToJson α] [FromJson α] :
     (fromJson? (toJson (none : Option α)) : Except String (Option α)) = .ok none := rfl
 
 /--
-`some a` survives only when `a` is not itself encoded as `null`, which is the price of encoding
-`none` as `null`. `Option (Option α)` is the case that pays it.
+`some a` encoded and decoded again is `some a`, when `a` itself round trips and is not encoded as
+`null`. Encoding `none` as `null` is what makes the second condition necessary, and
+`Option (Option α)` is the case that pays for it: `none` and `some none` share an encoding, so
+one of the two has to lose.
+
+`h` says `α` round trips, and is needed because the decoder calls `α`'s own decoder on the
+payload. `hne : toJson a ≠ Json.null` is what keeps the decoder out of its `none` branch;
+without it the claim would be false rather than merely unproved. The conclusion is `.ok (some a)`,
+the constructor as well as the payload coming back.
 -/
 theorem option_some_roundTrip {α : Type} [ToJson α] [FromJson α]
     (h : ∀ a : α, (fromJson? (toJson a) : Except String α) = .ok a) (a : α)
@@ -328,6 +402,16 @@ theorem option_some_roundTrip {α : Type} [ToJson α] [FromJson α]
   · simp [h a]
     rfl
 
+/--
+A pair encoded and decoded again is the pair it was, when both components round trip. A pair is
+written as a two-element array, so this also says the decoder's shape check accepts what the
+encoder writes, which a disagreement about arity would break.
+
+`ha` and `hb` say each component type round trips, and both are used, the decoder calling each in
+turn. The two types may live in different universes, which is why the decoder lifts each result
+through `ULift` before pairing them; the conclusion is `.ok p` for the pair itself, so neither the
+order of the components nor either of them is disturbed.
+-/
 theorem prod_roundTrip {α β : Type} [ToJson α] [FromJson α] [ToJson β] [FromJson β]
     (ha : ∀ a : α, (fromJson? (toJson a) : Except String α) = .ok a)
     (hb : ∀ b : β, (fromJson? (toJson b) : Except String β) = .ok b) (p : α × β) :
@@ -337,6 +421,15 @@ theorem prod_roundTrip {α β : Type} [ToJson α] [FromJson α] [ToJson β] [Fro
   simp [prodFromJson?, ha a, hb b, Except.map]
   rfl
 
+/--
+An array encoded and decoded again is the array it was, when its elements round trip. Encoding
+maps over the elements and decoding maps back, so what has to be shown is that a `mapM` of a
+function that always succeeds and returns its input leaves the array alone.
+
+`h` says `α` round trips, and is applied at each element. The conclusion is `.ok a` for the array
+itself, so its length and the order of its elements are part of what is claimed. The empty array
+is covered, and is the case in which `h` is never used.
+-/
 theorem array_roundTrip {α : Type} [ToJson α] [FromJson α]
     (h : ∀ a : α, (fromJson? (toJson a) : Except String α) = .ok a) (a : Array α) :
     (fromJson? (toJson a) : Except String (Array α)) = .ok a := by
@@ -345,6 +438,15 @@ theorem array_roundTrip {α : Type} [ToJson α] [FromJson α]
   show Array.mapM (fun x => pure x) a = pure a
   simpa using Array.mapM_pure (m := Except String) (f := id) (xs := a)
 
+/--
+A list encoded and decoded again is the list it was, when its elements round trip. Lists are
+encoded through arrays, so nothing new is proved here, but this is the form a caller with a `List`
+field actually needs.
+
+`h` says `α` round trips, and the conclusion is `.ok l`. The encoder converts to an array and the
+decoder converts back, so the claim is `array_roundTrip` at `l.toArray`, with `Array.toList`
+undoing the conversion.
+-/
 theorem list_roundTrip {α : Type} [ToJson α] [FromJson α]
     (h : ∀ a : α, (fromJson? (toJson a) : Except String α) = .ok a) (l : List α) :
     (fromJson? (toJson l) : Except String (List α)) = .ok l := by

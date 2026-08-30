@@ -120,6 +120,18 @@ def byteOffset (p : s.Pos) : Nat := p.offset.byteIdx
 def step? (p : s.Pos) : Option (Char × s.Pos) :=
   if h : p = s.endPos then none else some (p.get h, p.next h)
 
+/--
+Reading one character always leaves less text to read. The whole parser walks a `String.Pos`
+rather than a list, so it has no structurally smaller argument to recurse on; this is the measure
+every one of its termination arguments is ultimately built from, and without it none of `skipWs`,
+`string`, `digits` or the value machine could be written without `partial`.
+
+`h : step? p = some (c, q)` says there was a character `c` at `p` and `q` is the position just
+past it. `remainingBytes` counts the bytes from a position to the end of the text, and
+`q.remainingBytes < p.remainingBytes` says that count strictly fell. The `none` case of `step?`,
+where `p` is already the end, cannot arise under `h`, which is what makes the inequality strict
+rather than merely non-strict.
+-/
 theorem step?_lt {p q : s.Pos} {c : Char} (h : step? p = some (c, q)) :
     q.remainingBytes < p.remainingBytes := by
   rw [step?] at h
@@ -288,7 +300,17 @@ def stringStep (p : s.Pos) : StringStep s :=
     if Spec.isUnescaped c then .char c q
     else .fail ⟨byteOffset p, .controlCharInString c⟩
 
-/-- Reading a piece of a string always moves on, which is what makes `string` terminate. -/
+/--
+Finding the closing quotation mark of a string moves past it. `string` loops until `stringStep`
+reports the end, so the loop's measure has to fall on that step as well as on the ones that
+produce characters; this is that half.
+
+`stringStep p = .done q` says the piece read at `p` was the closing quotation mark and `q` is the
+position after it. The conclusion `q.remainingBytes < p.remainingBytes` says the text left to read
+strictly shrank. `.done` is produced by exactly one branch, the one that consumed a `"` through
+`step?`, so the claim reduces to `step?_lt`; every other branch makes the hypothesis unsatisfiable
+rather than the conclusion true.
+-/
 theorem stringStep_done_lt (p : s.Pos) :
     ∀ q, stringStep p = .done q → q.remainingBytes < p.remainingBytes := by
   fun_cases stringStep p with
@@ -299,6 +321,17 @@ theorem stringStep_done_lt (p : s.Pos) :
     exact step?_lt hc
   | _ => intro q h; simp at h
 
+/--
+Producing one character of a string consumes at least one character of the text. This is what
+makes `string` terminate: each turn of its loop appends a character and moves on, so the bytes
+remaining fall even where an escape stands for a character that was never literally there.
+
+`stringStep p = .char c q` says the piece read at `p` yielded the character `c` and left `q`. The
+conclusion `q.remainingBytes < p.remainingBytes` says the remaining text strictly shrank. Four
+branches produce `.char`: an unescaped character, a two-character escape, a `\u` escape, and a
+surrogate pair; each consumes at least the `step?` the proof appeals to, and the longer ones
+consume more, so no way of spelling a character consumes nothing.
+-/
 theorem stringStep_char_lt (p : s.Pos) :
     ∀ c q, stringStep p = .char c q → q.remainingBytes < p.remainingBytes := by
   fun_cases stringStep p with
@@ -376,15 +409,46 @@ def digitJoin (a b : Nat × Nat) : Nat × Nat := (a.1 * 10 ^ b.2 + b.1, a.2 + b.
 
 def digitStep (a : Nat × Nat) (d : Nat) : Nat × Nat := (a.1 * 10 + d, a.2 + 1)
 
+/--
+Splitting a run of digits into pieces and joining the pieces back up gives the same number
+whatever way the split was made. That is what allows the halving reader to be recognised as the
+one-digit-at-a-time reader: the two differ only in how they associate the joins.
+
+`digitJoin a b` places `a` above `b`, as `a.1 * 10 ^ b.2 + b.1` digits with `a.2 + b.2` of them,
+so its second component is a length and its first the number those digits spell. The equation
+`digitJoin (digitJoin a b) c = digitJoin a (digitJoin b c)` says joining the left pair first and
+joining the right pair first agree. The lengths agree by arithmetic on `+`; the values agree
+because `10 ^ (b.2 + c.2)` factors as `10 ^ b.2 * 10 ^ c.2`, which is what makes the two
+placements of `a` the same shift.
+-/
 private theorem digitJoin_assoc (a b c : Nat × Nat) :
     digitJoin (digitJoin a b) c = digitJoin a (digitJoin b c) := by
   simp only [digitJoin, Prod.mk.injEq]
   refine ⟨?_, by omega⟩
   rw [Nat.add_mul, Nat.mul_assoc, ← Nat.pow_add, Nat.add_assoc]
 
+/--
+Appending one digit is joining a run of length one, so the accumulating loop is a special case of
+the splitting reader rather than a different computation. Every step from the loop to the halving
+form goes through this reading.
+
+`digitStep a d = (a.1 * 10 + d, a.2 + 1)` is what the loop does to its accumulator on reading the
+digit `d`. `digitJoin a (d, 1)` places the one-digit run `(d, 1)` below `a`, giving
+`a.1 * 10 ^ 1 + d` with `a.2 + 1` digits. The two are the same term once `10 ^ 1` is `10`.
+-/
 private theorem digitStep_eq (a : Nat × Nat) (d : Nat) : digitStep a d = digitJoin a (d, 1) := by
   simp [digitStep, digitJoin]
 
+/--
+A run of digits contributes the same thing wherever the accumulator it is folded into came from:
+folding into `a` is folding into nothing and then joining the result below `a`. This is what lets
+a fold be cut at any point, which is what turning it into a divide-and-conquer needs.
+
+`ds.foldl digitStep a` reads the digits `ds` left to right into the accumulator `a`.
+`digitJoin a (ds.foldl digitStep (0, 0))` instead reads them into the empty accumulator and places
+`a` above the result. The induction is on `ds` with `a` generalised, since each step changes the
+accumulator, and `digitJoin_assoc` is what closes it.
+-/
 private theorem foldl_digitStep (ds : List Nat) (a : Nat × Nat) :
     ds.foldl digitStep a = digitJoin a (ds.foldl digitStep (0, 0)) := by
   induction ds generalizing a with
@@ -407,6 +471,17 @@ decreasing_by
   · simp only [List.length_drop, List.length_cons]
     omega
 
+/--
+The halving reader and the one-digit-at-a-time reader compute the same pair. `fromDigits` is what
+runs, because multiplying two numbers of similar length is what arbitrary-precision arithmetic is
+fast at, while the loop multiplies an ever longer number by ten; every proof is stated against the
+loop, and this is the bridge.
+
+`fromDigits ds` splits `ds` in half, reads each half and joins them; `ds.foldl digitStep (0, 0)`
+reads the digits one at a time from an empty accumulator. Both yield a value and a digit count.
+The induction follows `fromDigits`' own recursion, and `foldl_digitStep` supplies the step: a fold
+over `take ++ drop` is the fold over each half joined, which is exactly the split.
+-/
 private theorem fromDigits_eq (ds : List Nat) : fromDigits ds = ds.foldl digitStep (0, 0) := by
   fun_induction fromDigits ds with
   | case1 => simp
@@ -431,6 +506,18 @@ def digitsFast (start : s.Pos) (value count : Nat) : Consumed (Nat × Nat) start
   match digitList start start [] (Nat.le_refl _) with
   | ⟨ds, pos, h⟩ => ⟨digitJoin (value, count) (fromDigits ds.reverse), pos, h⟩
 
+/--
+One turn of the digit loop reads one digit and carries on from the next position. `digits.go`
+carries a proof that it has not overrun, so the loop cannot simply be unfolded by `rw`; this
+states the unfolding as an equation between the two calls, with the bookkeeping argument on each
+side left free.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hd` says `c` is a digit.
+The equation then relates `digits.go start p v n h`, the loop at `p` holding value `v` and count
+`n`, to `digits.go start q (v * 10 + Spec.digitVal c) (n + 1) h'`, the loop at `q` with the digit
+folded in. `h` and `h'` are the proofs that `p` and `q` have not passed `start`; they carry no
+information beyond their statements, so having a different one on each side is immaterial.
+-/
 private theorem digits_go_step {start p q : s.Pos} {c : Char} (hc : step? p = some (c, q))
     (hd : Spec.isDigit c = true) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes)
     (h' : q.remainingBytes ≤ start.remainingBytes) :
@@ -446,6 +533,16 @@ private theorem digits_go_step {start p q : s.Pos} {c : Char} (hc : step? p = so
     rw [if_pos hd]
   · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
 
+/--
+The digit loop stops where the digits do, returning what it has accumulated and the position it
+stopped at. The loop has two ways to end, at a non-digit and at the end of the text, and this
+covers both, so no case analysis on which of them occurred is needed at the point of use.
+
+`hstop` says that whatever character `step?` finds at `p`, if any, is not a digit; the vacuous
+case, where `step?` returns `none`, is the end of the text and is covered by the same hypothesis.
+The conclusion `digits.go start p v n h = ⟨(v, n), p, h⟩` says the loop returns its
+accumulated value and count unchanged, and the position `p` it was called at.
+-/
 private theorem digits_go_stop {start p : s.Pos} (v n : Nat)
     (h : p.remainingBytes ≤ start.remainingBytes)
     (hstop : ∀ c q, step? p = some (c, q) → Spec.isDigit c = false) :
@@ -455,6 +552,19 @@ private theorem digits_go_stop {start p : s.Pos} (v n : Nat)
   · next c' q' hc' => rw [if_neg (by simp [hstop c' q' hc'])]
   · rfl
 
+/--
+The loop and the list-then-halve reader agree at every position, not merely at the start. Both
+walk the same digits, but one folds as it goes and the other keeps the digits and reads them
+afterwards, so they can only be compared in a form general enough to be an induction hypothesis:
+this is that form, with the accumulator and the starting position both free.
+
+`acc` is the digits already collected, most recent first, so `fromDigits acc.reverse` is what they
+spell and `digitJoin (v, c) (fromDigits acc.reverse)` is the loop's accumulator at the same point.
+The equation says the loop started there ends with the value, position and bound that `digitList`
+reports, read through the same `digitJoin`. The induction follows `digitList`, whose three cases
+are a digit read, a non-digit, and the end of the text; `digits_go_step` handles the first and
+`digits_go_stop` the other two.
+-/
 private theorem digits_go_eq (start : s.Pos) (v c : Nat) :
     ∀ (p : s.Pos) (acc : List Nat) (h : p.remainingBytes ≤ start.remainingBytes),
       digits.go start p (digitJoin (v, c) (fromDigits acc.reverse)).1
@@ -490,6 +600,17 @@ private theorem digits_go_eq (start : s.Pos) (v c : Nat) :
     rw [hc] at hcq
     exact absurd hcq (by simp)
 
+/--
+The two digit readers agree from a fresh start, which is the instance that matters: it is what
+lets the fast one replace the one every proof about numbers is written against. `digitsFast` is
+where reading a long number stopped costing time quadratic in its digits.
+
+`digitsFast start value count` collects the digits into a list and reads them by repeated halving;
+`digits start value count` folds them one at a time. Equality is of the whole `Consumed` record,
+so the value, the digit count and the stopping position all agree, and the two are interchangeable
+wherever either appears. It is `digits_go_eq` at the empty accumulator, where
+`digitJoin (value, count) (fromDigits [])` collapses to `(value, count)`.
+-/
 theorem digitsFast_eq (start : s.Pos) (value count : Nat) :
     digitsFast start value count = digits start value count := by
   have hgo := digits_go_eq start value count start [] (Nat.le_refl _)
@@ -498,6 +619,15 @@ theorem digitsFast_eq (start : s.Pos) (value count : Nat) :
   rw [digits, digitsFast]
   exact hgo.symm
 
+/--
+The compiler is told to run the fast reader in place of the one the library is stated in terms of.
+Everything proved about numbers speaks of `digits`, and everything executed is `digitsFast`, and
+this is what makes those the same program rather than two that happen to be proved equal.
+
+The equation `@digits = @digitsFast` is between the functions themselves, over every string,
+starting position, value and count, which is what `@[csimp]` requires before it will substitute
+one for the other in compiled code. It follows from `digitsFast_eq` by `funext`.
+-/
 @[csimp] theorem digits_eq_digitsFast : @digits = @digitsFast := by
   funext s start value count
   exact (digitsFast_eq start value count).symm

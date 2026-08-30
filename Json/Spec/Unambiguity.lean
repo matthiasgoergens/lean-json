@@ -35,6 +35,17 @@ unique only once its remainder is pinned down, which is what `Json.Spec.Follow` 
 of digits must not be followed by a digit, a fraction not by a point, an exponent not by an `e`.
 -/
 
+/--
+A run of digits has one reading, once it is known not to be followed by another digit. The grammar
+is genuinely ambiguous here: `12` derives as `1` with `2` left over as readily as it derives as
+`12`, so without a condition on what follows there is no single answer to give.
+
+`h₁` and `h₂` are two derivations from the same `s`, and `hn₁`, `hn₂` say neither
+remainder begins with a digit. The conclusion `v₁ = v₂ ∧ n₁ = n₂ ∧ r₁ = r₂` fixes
+the value, the digit count and the remainder together. The two `NoDigit` conditions are what
+exclude the mismatched cases, where one derivation stopped and the other went on; `digits_head`
+turns that continuation into a digit the condition forbids.
+-/
 theorem digits_unique {s : List Char} {v₁ n₁ : Nat} {r₁ : List Char}
     (h₁ : Digits s v₁ n₁ r₁) : ∀ {v₂ n₂ : Nat} {r₂ : List Char}, Digits s v₂ n₂ r₂ →
       NoDigit r₁ → NoDigit r₂ → v₁ = v₂ ∧ n₁ = n₂ ∧ r₁ = r₂ := by
@@ -60,6 +71,17 @@ theorem digits_unique {s : List Char} {v₁ n₁ : Nat} {r₁ : List Char}
       obtain ⟨hv, hn, hr⟩ := ih h₂' hn₁ hn₂
       exact ⟨by rw [hv, hn], by rw [hn], hr⟩
 
+/--
+The integer part of a number has one reading, once it is known not to be followed by a digit. The
+ABNF gives a leading zero its own case, so `01` is not one integer, and this says among other
+things that the two cases cannot both apply to one text.
+
+`h₁` and `h₂` are two `Int'` derivations from `s`, and `hn₁`, `hn₂` say neither remainder
+begins with a digit. The conclusion is `v₁ = v₂ ∧ r₁ = r₂`. The `zero` and `digits`
+constructors are told apart by their leading character, `'0'` against `'1'` to `'9'`, which
+`decide` settles; where both are `digits`, `digits_unique` under the same two conditions finishes
+it.
+-/
 private theorem int_unique {s : List Char} {v₁ v₂ : Nat} {r₁ r₂ : List Char}
     (h₁ : Int' s v₁ r₁) (h₂ : Int' s v₂ r₂) (hn₁ : NoDigit r₁) (hn₂ : NoDigit r₂) :
     v₁ = v₂ ∧ r₁ = r₂ := by
@@ -75,6 +97,17 @@ private theorem int_unique {s : List Char} {v₁ v₂ : Nat} {r₁ r₂ : List C
       obtain ⟨hv, _, hr⟩ := digits_unique hd₁ hd₂ hn₁ hn₂
       exact ⟨hv, hr⟩
 
+/--
+A fraction has one reading, once it is known not to be followed by a digit or a decimal point. It
+is optional, so the point is what distinguishes a fraction that is there from one that is not, and
+its digits need the same condition as any other run.
+
+`h₁` and `h₂` are two `Frac` derivations from `s`, and `hn₁`, `hn₂` are `NoFrac` on the
+two remainders, forbidding both a digit and a `'.'`. The conclusion gives the value, the digit
+count and the remainder. The mixed cases, one fraction present and the other absent, are excluded
+by the `'.'` half of the condition; the case where both are present reduces to `digits_unique`
+through `noDigit_of_noFrac`.
+-/
 private theorem frac_unique {s : List Char} {f₁ n₁ f₂ n₂ : Nat} {r₁ r₂ : List Char}
     (h₁ : Frac s f₁ n₁ r₁) (h₂ : Frac s f₂ n₂ r₂) (hn₁ : NoFrac r₁) (hn₂ : NoFrac r₂) :
     f₁ = f₂ ∧ n₁ = n₂ ∧ r₁ = r₂ := by
@@ -89,6 +122,17 @@ private theorem frac_unique {s : List Char} {f₁ n₁ f₂ n₂ : Nat} {r₁ r�
     | present hd₂ =>
       exact digits_unique hd₁ hd₂ (noDigit_of_noFrac hn₁) (noDigit_of_noFrac hn₂)
 
+/--
+An exponent has one reading, once it is known not to be followed by a digit or by an `e`. It has
+four constructors, one absent and three present, which makes it the widest case analysis among the
+number productions.
+
+`h₁` and `h₂` are two `Exp` derivations from `s`, and `hn₁`, `hn₂` are `NoExp` on the
+remainders, forbidding a digit, an `'e'` and an `'E'`. The conclusion is
+`e₁ = e₂ ∧ r₁ = r₂`. The absent case is separated from the three present ones by the
+`'e'` and `'E'` halves of the condition; the three present ones are separated from each other by
+whether a `'+'` or a `'-'` follows, through `not_digits_cons`, a sign not being a digit.
+-/
 private theorem exp_unique {s : List Char} {e₁ e₂ : Int} {r₁ r₂ : List Char}
     (h₁ : Exp s e₁ r₁) (h₂ : Exp s e₂ r₂) (hn₁ : NoExp r₁) (hn₂ : NoExp r₂) :
     e₁ = e₂ ∧ r₁ = r₂ := by
@@ -137,6 +181,17 @@ private theorem exp_unique {s : List Char} {e₁ e₂ : Int} {r₁ r₂ : List C
         digits_unique hd₁ hd₂ (noDigit_of_noExp hn₁) (noDigit_of_noExp hn₂)
       exact ⟨by rw [hv], hr⟩
 
+/--
+A number's sign has one reading, and what settles it is the integer part that comes after rather
+than any condition on the remainder. That part must begin with a digit, and a minus is not one,
+which is enough to tell a sign that is there from one that is not.
+
+`h₁` and `h₂` are two `Sign` derivations from `s`, and `hi₁`, `hi₂` are the integer parts
+that follow each of them. The conclusion `b₁ = b₂ ∧ a₁ = a₂` fixes both the flag and the
+text the integer part starts at. The integer hypotheses earn their place in the mixed cases: there
+one derivation would have the integer part begin at the `'-'`, which `int_head` says is a digit
+and `decide` says is not.
+-/
 private theorem sign_unique {s : List Char} {b₁ b₂ : Bool} {a₁ a₂ : List Char} {i₁ i₂ : Nat}
     {t₁ t₂ : List Char} (h₁ : Sign s b₁ a₁) (h₂ : Sign s b₂ a₂)
     (hi₁ : Int' a₁ i₁ t₁) (hi₂ : Int' a₂ i₂ t₂) : b₁ = b₂ ∧ a₁ = a₂ := by
@@ -158,7 +213,19 @@ private theorem sign_unique {s : List Char} {b₁ b₂ : Bool} {a₁ a₂ : List
       exact absurd hd (by decide)
     | minus => exact ⟨rfl, rfl⟩
 
-/-- What may follow a number is enough to say which number it is. -/
+/--
+A number has one reading, once it is known what may follow it. This is the ambiguity the ABNF
+genuinely carries, and `Follows` is what resolves it: nothing that can come after a value in a
+well-formed text can continue a number.
+
+`h₁` and `h₂` are two `Num` derivations from `s`, and `f₁`, `f₂` say each remainder is
+empty or begins with whitespace, a comma, or a closing bracket or brace. The conclusion
+`n₁ = n₂ ∧ r₁ = r₂` fixes both the number and where it ended. The four parts are settled
+in order: the sign by `sign_unique`, the integer part by `int_unique` under `noDigit_after_int`,
+the fraction by `frac_unique` under `noFrac_after_exp`, and the exponent by `exp_unique` under
+`noExp_of_follows`. Each of those conditions is derived from `Follows` by working backwards from
+the end of the number.
+-/
 theorem num_unique {s : List Char} {n₁ n₂ : Number} {r₁ r₂ : List Char}
     (h₁ : Num s n₁ r₁) (h₂ : Num s n₂ r₂) (f₁ : Follows r₁) (f₂ : Follows r₂) :
     n₁ = n₂ ∧ r₁ = r₂ := by
@@ -187,6 +254,15 @@ what separates them is that no character carries a surrogate code point: a four-
 the surrogate range denotes nothing on its own, so only the pair rule can derive it.
 -/
 
+/--
+Four hexadecimal digits have one reading. `Hex4` matches a fixed number of characters, which makes
+it the one production whose uniqueness needs no condition on what follows it and no induction.
+
+`h₁` and `h₂` are two derivations from `s`, and the conclusion is
+`v₁ = v₂ ∧ r₁ = r₂`. Both derivations match the same four characters, and `hexVal?` is a
+function, so they record the same four values; the remainder is what is left after exactly four
+characters either way.
+-/
 private theorem hex4_unique {s : List Char} {v₁ v₂ : Nat} {r₁ r₂ : List Char}
     (h₁ : Hex4 s v₁ r₁) (h₂ : Hex4 s v₂ r₂) : v₁ = v₂ ∧ r₁ = r₂ := by
   cases h₁ with
@@ -207,6 +283,18 @@ private theorem hex4_unique {s : List Char} {v₁ v₂ : Nat} {r₁ r₂ : List 
       subst d
       exact ⟨rfl, rfl⟩
 
+/--
+One character of a string literal has one reading. The escapes all share a leading backslash and
+the two `\u` rules share their first six characters, so this is where the grammar comes closest to
+being ambiguous, and where it is saved by no `Char` carrying a surrogate code point.
+
+`h₁` and `h₂` are two `Ch` derivations from `s`, and `c₁ = c₂ ∧ r₁ = r₂` holds with
+no side condition, each constructor fixing its own leading characters. `unescaped` is separated
+from every escape by `isUnescaped` excluding the backslash. The interesting pair is `codePoint`
+against `surrogatePair`: both begin `\u`, and `hex4_unique` makes them agree on the four digits,
+so what separates them is `char_not_surrogate`, `codePoint` having to name a character whose code
+point lies in the very range `surrogatePair` requires.
+-/
 private theorem ch_unique {s : List Char} {c₁ c₂ : Char} {r₁ r₂ : List Char}
     (h₁ : Ch s c₁ r₁) (h₂ : Ch s c₂ r₂) : c₁ = c₂ ∧ r₁ = r₂ := by
   cases h₁ with
@@ -269,6 +357,17 @@ private theorem ch_unique {s : List Char} {c₁ c₂ : Char} {r₁ r₂ : List C
       obtain ⟨hvlo, hr⟩ := hex4_unique hlo₁ hlo₂
       exact ⟨Char.toNat_inj.mp (by rw [hc₁, hc₂, hvhi, hvlo]), hr⟩
 
+/--
+A run of string characters has one reading, once it is known that no further character can be
+taken. The run is greedy only because of that condition; without it a literal's body could stop
+anywhere inside itself.
+
+`h₁` and `h₂` are two `Chars` derivations from `s`, and `hn₁`, `hn₂` say neither remainder
+can begin a `Ch`. The conclusion `cs₁ = cs₂ ∧ r₁ = r₂` fixes both the characters and
+where the run stopped. The mismatched cases, one run empty and the other not, are excluded by the
+`NoCh` condition on the empty one; the matching case is `ch_unique` followed by the induction
+hypothesis.
+-/
 private theorem chars_unique {s : List Char} {cs₁ : List Char} {r₁ : List Char}
     (h₁ : Chars s cs₁ r₁) : ∀ {cs₂ r₂ : List Char}, Chars s cs₂ r₂ →
       NoCh r₁ → NoCh r₂ → cs₁ = cs₂ ∧ r₁ = r₂ := by
@@ -289,6 +388,16 @@ private theorem chars_unique {s : List Char} {cs₁ : List Char} {r₁ : List Ch
       obtain ⟨hcs, hr⟩ := ih h₂' hn₁ hn₂
       exact ⟨by rw [hcs], hr⟩
 
+/--
+A string literal has one reading, with no condition at all on what follows it. That sets it apart
+from a number: the closing quotation mark is a character no `Ch` can begin with, so the literal
+ends where it ends whatever comes next.
+
+`h₁` and `h₂` are two `Str` derivations from `s`, and the conclusion is
+`v₁ = v₂ ∧ r₁ = r₂`. `chars_unique` settles the body, and its two `NoCh` conditions are
+both discharged by `noCh_quote`, each derivation being required to stop its body at a `'"'`. The
+final `injection` is what strips that quotation mark off the remainder.
+-/
 theorem str_unique {s : List Char} {v₁ v₂ : String} {r₁ r₂ : List Char}
     (h₁ : Str s v₁ r₁) (h₂ : Str s v₂ r₂) : v₁ = v₂ ∧ r₁ = r₂ := by
   cases h₁ with
@@ -311,9 +420,29 @@ whitespace and so starts in the same place either way.
 
 private def WsEq (a b : List Char) : Prop := Ws a b ∨ Ws b a
 
+/--
+Every text stands in the whitespace relation to itself. Two derivations of one text may leave
+remainders that differ by some whitespace, which is what `WsEq` records, and a proof comparing a
+text with itself needs the reflexive case of it.
+
+`WsEq a b` is `Ws a b ∨ Ws b a`, one remainder reachable from the other by whitespace.
+`WsEq a a` takes the left disjunct with `Ws.nil`, the run that consumes nothing. Nothing about `a`
+is used, so it holds of every text.
+-/
 private theorem WsEq.refl (a : List Char) : WsEq a a := Or.inl Ws.nil
 
-/-- Whitespace either side of a structural character does not move the character. -/
+/--
+Whitespace on either side of a structural character does not move the character. Two derivations
+may divide a run of spaces differently, and this is what says they nonetheless arrive at the same
+bracket, with the same text behind it.
+
+`h : WsEq a b` says the two starting points differ only by whitespace, `h₁` and `h₂` are runs
+reaching a leading character in each, and `n₁`, `n₂` say those two characters are not
+themselves whitespace. The conclusion `t₁ = t₂ ∧ u₁ = u₂` says the character and
+everything after it agree. The two non-whitespace conditions are what `Ws.eq_of_noWs` needs in
+order to place both runs at the same character; without them the runs could stop at different
+points in the same text.
+-/
 private theorem wsEq_token_eq {a b : List Char} {t₁ t₂ : Char} {u₁ u₂ : List Char}
     (h : WsEq a b) (h₁ : Ws a (t₁ :: u₁)) (h₂ : Ws b (t₂ :: u₂))
     (n₁ : isWs t₁ = false) (n₂ : isWs t₂ = false) : t₁ = t₂ ∧ u₁ = u₂ := by
@@ -326,6 +455,17 @@ private theorem wsEq_token_eq {a b : List Char} {t₁ t₂ : Char} {u₁ u₂ : 
   · exact key h₁ (hab.trans h₂)
   · exact key (hba.trans h₁) h₂
 
+/--
+A token can still be read after some of its leading whitespace has already been skipped. Every
+structural character carries whitespace on both sides, so a proof that has consumed part of a run
+must be able to hand the rest to a derivation that expects the whole of it.
+
+`hw : Ws x y` says whitespace took `x` to `y`, `h : Token t x r` reads the token from `x`, and
+`hnw` says the token's own character is not whitespace. `Token t y r` reads the same token from
+the shortened text with the same remainder. Confluence puts `y` and the token's leading run in one
+order or the other; where `y` is the further on, `ws_eq_of_not_isWs` says nothing more can have
+been taken, and `hnw` is what makes that so.
+-/
 theorem token_ws {x y : List Char} {t : Char} {r : List Char} (hnw : isWs t = false)
     (hw : Ws x y) (h : Token t x r) : Token t y r := by
   cases h with
@@ -334,18 +474,48 @@ theorem token_ws {x y : List Char} {t : Char} {r : List Char} (hnw : isWs t = fa
     · exact Token.mk hc h₂
     · exact Token.mk (by rw [ws_eq_of_not_isWs hnw hc]; exact Ws.nil) h₂
 
+/--
+An array can still be read after some leading whitespace has been skipped. The array production
+opens with a token whose own whitespace absorbs what was taken, and this carries that through both
+of its constructors.
+
+`hw : Ws x y` says whitespace took `x` to `y`, and `h : Arr x e r` derives an array from `x`. The
+conclusion `Arr y e r` derives the same elements with the same remainder from `y`. Both `empty`
+and `items` open with a `BeginArray`, which `token_ws` moves, `decide` supplying that `'['` is not
+whitespace; the rest of each derivation is carried across untouched.
+-/
 theorem arr_ws {x y : List Char} {e : Array Json} {r : List Char} (hw : Ws x y)
     (h : Arr x e r) : Arr y e r := by
   cases h with
   | empty hb he => exact Arr.empty (token_ws (by decide) hw hb) he
   | items hb hel he => exact Arr.items (token_ws (by decide) hw hb) hel he
 
+/--
+An object can still be read after some leading whitespace has been skipped. It is the object's
+counterpart to the array case, needed separately because `Object` is a distinct production with
+its own two constructors.
+
+`hw : Ws x y` and `h : Object x f r` give `Object y f r`, the same fields and the same remainder.
+Both `empty` and `members` open with a `BeginObject`, moved by `token_ws` with `decide` supplying
+that `'{'` is not whitespace.
+-/
 theorem obj_ws {x y : List Char} {f : Array (String × Json)} {r : List Char} (hw : Ws x y)
     (h : Object x f r) : Object y f r := by
   cases h with
   | empty hb he => exact Object.empty (token_ws (by decide) hw hb) he
   | members hb hms he => exact Object.members (token_ws (by decide) hw hb) hms he
 
+/--
+A value can still be read after some leading whitespace has been skipped. This is the form the
+uniqueness proof uses when it brings two derivations to a common starting point, and it has to
+hold for all seven alternatives rather than only the two containers.
+
+`hw : Ws x y` and `h : Value x j r` give `Value y j r`, the same value and remainder. The
+literals, strings and numbers begin with a character that is not whitespace, so
+`ws_eq_of_not_isWs` says nothing was taken and `y` is `x` itself; for a number that character is a
+minus or a digit, and `isWs_of_isDigit` is what settles the digit case. Only the containers
+actually absorb whitespace, and they do so through `arr_ws` and `obj_ws`.
+-/
 theorem value_ws {x y : List Char} {j : Json} {r : List Char} (hw : Ws x y)
     (h : Value x j r) : Value y j r := by
   cases h with
@@ -367,12 +537,30 @@ theorem value_ws {x y : List Char} {j : Json} {r : List Char} (hw : Ws x y)
   | arr ha => exact Value.arr (arr_ws hw ha)
   | obj ho => exact Value.obj (obj_ws hw ho)
 
+/--
+A list of array elements can still be read after some leading whitespace has been skipped. Its
+first element is a value, so this is `value_ws` carried through the two constructors of
+`Elements`.
+
+`hw : Ws x y` and `h : Elements x vs r` give `Elements y vs r`, the same values and remainder.
+Both `one` and `more` open with a `Value`, which `value_ws` moves; the separator and the tail of
+the list are untouched, being reached only after that first value.
+-/
 theorem elements_ws {x y : List Char} {vs : List Json} {r : List Char} (hw : Ws x y)
     (h : Elements x vs r) : Elements y vs r := by
   cases h with
   | one hv => exact Elements.one (value_ws hw hv)
   | more hv hs he => exact Elements.more (value_ws hw hv) hs he
 
+/--
+An object member can still be read after some leading whitespace has been skipped, and in fact
+none can have been. A member opens with a string literal, whose quotation mark is not whitespace,
+so the run must have consumed nothing.
+
+`hw : Ws x y` and `h : Member x m r` give `Member y m r`. The single constructor opens with a
+`Str`, which begins with `'"'`, so `ws_eq_of_not_isWs` says `y` is `x` and the derivation is
+rebuilt exactly as it was. The colon and the value that follow are carried across unchanged.
+-/
 theorem member_ws {x y : List Char} {m : String × Json} {r : List Char} (hw : Ws x y)
     (h : Member x m r) : Member y m r := by
   cases h with
@@ -382,6 +570,15 @@ theorem member_ws {x y : List Char} {m : String × Json} {r : List Char} (hw : W
       rw [ws_eq_of_not_isWs (by decide) hw]
       exact Member.mk (Str.mk hcs) hsep hval
 
+/--
+A list of object members can still be read after some leading whitespace has been skipped. It is
+the object counterpart of the claim about elements, and is used in the same place: bringing two
+derivations of one text to a common starting point.
+
+`hw : Ws x y` and `h : Members x ms r` give `Members y ms r`, the same fields and remainder. Both
+`one` and `more` open with a `Member`, which `member_ws` moves; as there, the run turns out to
+have consumed nothing.
+-/
 theorem members_ws {x y : List Char} {ms : List (String × Json)} {r : List Char}
     (hw : Ws x y) (h : Members x ms r) : Members y ms r := by
   cases h with
@@ -402,11 +599,31 @@ or members needs the closing bracket itself, because `1` followed by `,2]` and `
 `]` are both derivations of the same text, and only the bracket tells them apart.
 -/
 
+/--
+Two texts differing only by whitespace can both be advanced to a single text. `WsEq` is a
+disjunction that says nothing about which of the two is further on, and this turns it into a
+common point that a proof can work forward from without case-splitting again.
+
+`h : WsEq a b` is `Ws a b ∨ Ws b a`. The conclusion produces a `c` with `Ws a c` and `Ws b c`,
+so both texts reach it by whitespace. In each disjunct `c` is whichever of the two is already the
+further on, the other run being `Ws.nil`; no text beyond those two is ever needed.
+-/
 private theorem wsEq_common {a b : List Char} (h : WsEq a b) : ∃ c, Ws a c ∧ Ws b c := by
   rcases h with hab | hba
   · exact ⟨b, hab, Ws.nil⟩
   · exact ⟨a, Ws.nil, hba⟩
 
+/--
+A run of whitespace reaching a character that is not whitespace reaches it from either of two
+starting points that differ only by whitespace. It is what carries a structural character's
+position from one of two derivations being compared to the other.
+
+`h : WsEq a b` relates the two starting points, `hws : Ws a (t :: u)` is the run from the first,
+and `hnw` says `t` is not whitespace. The conclusion `Ws b (t :: u)` runs from the second to the
+same place. Where `b` is behind `a` the two runs simply compose; where it is ahead, confluence
+together with `ws_eq_of_not_isWs` shows it cannot have gone past `t`, and `hnw` is what forbids
+that.
+-/
 private theorem ws_to_token {a b : List Char} {t : Char} {u : List Char} (h : WsEq a b)
     (hws : Ws a (t :: u)) (hnw : isWs t = false) : Ws b (t :: u) := by
   rcases h with hab | hba
@@ -438,6 +655,21 @@ private def MembersUnique (s : List Char) : Prop :=
   ∀ {ms₁ r₁ ms₂ r₂ x₁ x₂}, Members s ms₁ r₁ → Members s ms₂ r₂ →
     EndObject r₁ x₁ → EndObject r₂ x₂ → ms₁ = ms₂ ∧ WsEq r₁ r₂
 
+/--
+Each of the six mutually recursive productions names at most one value for a text, given whatever
+pins its remainder down. They are one mutual definition, so none can be proved alone; this proves
+all six together, and `text_unique` is what the rest of the library takes from it.
+
+`n` bounds the text's length, by `hs : s.length ≤ n`, and the induction runs on `n`, every
+derivation leaving strictly less text by the bounds in `Json.Spec.Length`. Each conjunct is one of
+the six `…Unique` predicates: two derivations from the same `s` agree on the value they name,
+and their remainders are `WsEq`, which is as much as can be claimed, whitespace being divisible
+anywhere. `ValueUnique` and `MemberUnique` carry `Follows` on both remainders; `ElementsUnique`
+and `MembersUnique` carry the closing bracket or brace instead, since `1` followed by `,2]` and
+`1,2` followed by `]` derive the same text and only that bracket tells them apart; `ArrUnique` and
+`ObjectUnique` need no condition, their own brackets ending them. The bound cannot empty the
+claim, `n := s.length` satisfying `hs` for every `s`.
+-/
 private theorem family_unique : ∀ (n : Nat) (s : List Char), s.length ≤ n →
     ArrUnique s ∧ ObjectUnique s ∧ ValueUnique s ∧ ElementsUnique s ∧ MemberUnique s ∧
       MembersUnique s := by
@@ -764,11 +996,16 @@ private theorem family_unique : ∀ (n : Nat) (s : List Char), s.length ≤ n �
 /-! ## Text -/
 
 /--
-A text names at most one value.
+A text names at most one value. This is a claim about the transcription of the grammar rather than
+about the parser: were two values derivable from one text, "the value this text denotes" would
+mean nothing, and no proof about the parser could repair it.
 
-The two derivations need not divide the leading whitespace the same way, so they are brought to
-a common starting point first; from there `Follows` holds of both remainders, because a text
-ends in nothing but whitespace.
+`h₁ : Text s j₁` and `h₂ : Text s j₂` each say `s` is whitespace, then a value, then
+whitespace, with nothing left over. The conclusion `j₁ = j₂` equates the two values; the
+remainders are not compared, `Text` having already required both to be empty. The two derivations
+need not divide the leading whitespace the same way, so `wsEq_common` and `value_ws` bring them to
+a common starting point first, and `follows_of_ws` then supplies `Follows` for both remainders, a
+text ending in nothing but whitespace.
 -/
 theorem text_unique {s : List Char} {j₁ j₂ : Json} (h₁ : Text s j₁) (h₂ : Text s j₂) : j₁ = j₂ := by
   obtain ⟨a₁, b₁, hw₁, hv₁, he₁⟩ := h₁
@@ -777,7 +1014,15 @@ theorem text_unique {s : List Char} {j₁ j₂ : Json} (h₁ : Text s j₁) (h�
   exact ((family_unique c.length c (Nat.le_refl _)).2.2.1 (value_ws hc₁ hv₁) (value_ws hc₂ hv₂)
     (follows_of_ws he₁) (follows_of_ws he₂)).1
 
-/-- The same for a `String`, which is the form the parser's entry point takes. -/
+/--
+A `String` names at most one value. `parse` takes a `String` rather than a list of characters, so
+this is the form of uniqueness that the parser's own theorems can be composed with.
+
+`TextOf s j` is `Text s.toList j`, so the two hypotheses are `Text` derivations over the string's
+characters and the conclusion `j₁ = j₂` is `text_unique` applied to that list. The conversion
+is definitional, so nothing is proved here beyond restating the claim at the type the entry point
+uses.
+-/
 theorem textOf_unique {s : String} {j₁ j₂ : Json} (h₁ : TextOf s j₁) (h₂ : TextOf s j₂) :
     j₁ = j₂ := text_unique h₁ h₂
 

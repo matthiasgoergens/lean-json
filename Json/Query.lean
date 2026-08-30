@@ -134,7 +134,17 @@ What the two claims come down to, once the recursion over the path is peeled awa
 over an object's fields does, which the lemmas in `Json.Basic` say.
 -/
 
-/-- Whatever is put at a path is what is found there. -/
+/--
+Whatever `set?` reports having stored is what a subsequent read of the same path finds. Without
+this, a success could mean the value went somewhere else along the way, or nowhere at all, and
+nothing about the interface would say so.
+
+`j.set? p v = .ok j'` is the hypothesis that storing `v` at `p` in `j` succeeded and produced
+`j'`; `j'.get? p = some v` says reading `p` out of `j'` finds a value and that value is `v`.
+`get?` answers `some` only when every step of the path exists in the value it is walking, so the
+conclusion also says the path is still reachable in the result. Since `set?` appends a final field
+that was missing, the claim covers building a field as well as replacing one.
+-/
 theorem get?_set? : ∀ (p : Path) (j v j' : Json), j.set? p v = .ok j' → j'.get? p = some v := by
   intro p
   induction p with
@@ -207,7 +217,17 @@ theorem get?_set? : ∀ (p : Path) (j v j' : Json), j.set? p v = .ok j' → j'.g
             simpa using ih child v child' hc
       | null | bool _ | num _ | str _ | obj _ => simp [set?] at h
 
-/-- Putting back what is already at a path changes nothing. -/
+/--
+Storing back the value already at a path leaves the whole document alone, not merely the value at
+that path. That is what makes `set?` a targeted edit: it does not reorder fields, collapse a
+repeated name, or otherwise disturb what it walked through on the way.
+
+`j.get? p = some v` says `p` reaches a value in `j` and that value is `v`. The conclusion
+`j.set? p v = .ok j` says storing that same `v` back at `p` succeeds and returns `j` itself, equal
+as a term, so array order and duplicate field names survive. The hypothesis is what makes the
+success part hold: reading found every step of the path, so none of the cases in which `set?`
+reports a missing intermediate can apply.
+-/
 theorem set?_get? : ∀ (p : Path) (j v : Json), j.get? p = some v → j.set? p v = .ok j := by
   intro p
   induction p with
