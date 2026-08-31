@@ -144,6 +144,14 @@ def floats : Array TestCase := #[
   expectEq "negative zero becomes zero" (compress (toJson (-0.0 : Float))) "0"
 ]
 
+/-! ## Coercions -/
+
+-- The coercions in `Basic` and the `ToJson` instances here are separate definitions of the same
+-- encoding, so they have to keep agreeing.
+example (n : Nat) : ((n : Json)) = toJson n := rfl
+
+example (i : Int) : ((i : Json)) = toJson i := rfl
+
 /-! ## Properties -/
 
 -- Bit patterns drawn straight from a small natural are all subnormal, the exponent field being

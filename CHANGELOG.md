@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.0] - 2026-08-31
+
+* Coercions from `Nat` and `Int` to `Json` and to `Number`
+
 ## [0.2.1] - 2026-08-30
 
 * A doc comment on every theorem, saying what it establishes and reading its statement back term by term

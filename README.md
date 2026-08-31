@@ -54,7 +54,7 @@ An object's members keep the order they were written in, and a repeated name is 
 
 `Number` is a `mantissa : Int` and an `exponent : Int` denoting `mantissa * 10 ^ exponent`. The exponent is never evaluated as a power of ten, so `1e1000000000` costs nothing to hold. Every number a parse returns is canonical, meaning one spelling per value, so `==`, `compare` and `hash` cannot disagree. `toFloat`, `ofFloat?`, `toInt?` and `toNat?` convert out, the last two within a padding bound.
 
-- Building: `mkObj`, `ofNat`, `ofInt`, coercions from `Bool`, `String` and `Number`, and numeric literals.
+- Building: `mkObj`, `ofNat`, `ofInt`, coercions from `Bool`, `String`, `Nat`, `Int` and `Number`, and numeric literals.
 - Reading, each returning `Except String _`: `getBool?`, `getNum?`, `getStr?`, `getArr?`, `getObj?`, `getInt?`, `getNat?`, `getObjVal?`, `getArrVal?`, `setObjVal?`. Also `getObjValD`, `mergeObj`, `isNull`, `findLast?`, `dedupKeys`.
 - Whole-value: `depth`, `uniqueKeys`, `canonicalNumbers`, `==`, `compare`, `hash`. Each keeps its pending work on the heap, so any of them answers at any depth.
 
