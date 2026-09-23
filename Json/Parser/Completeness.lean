@@ -471,7 +471,7 @@ character.
 -/
 theorem charOfCodePoint?_self (c : Char) : charOfCodePoint? c.toNat = some c := by
   have hv : UInt32.ofNat c.toNat = c.val := UInt32.ofNat_toNat
-  rw [charOfCodePoint?, dif_pos (hv ▸ c.valid)]
+  rw [charOfCodePoint?, dite_eq_left (hv ▸ c.valid)]
   simp [hv]
 
 /--
@@ -588,7 +588,7 @@ theorem stringStep_unescaped {p q : s.Pos} {c : Char} (hs : step? p = some (c, q
     injection hc' with hcc hww
     subst hcc
     subst hww
-    rw [if_pos hu]
+    rw [ite_eq_left hu]
 
 /--
 A two-character escape is read as the character it stands for. There are eight of them and the
@@ -677,7 +677,7 @@ theorem stringStep_codePoint {p q w : s.Pos} {v : Nat} {t : List Char} {c : Char
         rcases Spec.char_not_surrogate c with hs | hs
         · simp [hs]
         · simp [hs]
-      rw [if_pos hcond, hh4v, ← hcv, charOfCodePoint?_self]
+      rw [ite_eq_left hcond, hh4v, ← hcv, charOfCodePoint?_self]
       exact ⟨_, rfl, hh4p⟩
     · next _ _ _ hn hd =>
       rw [h₂] at hd
@@ -735,9 +735,9 @@ theorem stringStep_surrogate {p q w : s.Pos} {s₂ t : List Char} {hi lo : Nat} 
         rw [hh4v]
         simp only [Bool.or_eq_true, decide_eq_true_eq, not_or, Nat.not_lt]
         omega
-      rw [if_neg hhigh, if_pos (show h4.value ≤ 0xDBFF by rw [hh4v]; omega)]
+      rw [ite_eq_right hhigh, ite_eq_left (show h4.value ≤ 0xDBFF by rw [hh4v]; omega)]
       simp only [hl4]
-      rw [if_pos (show (decide (0xDC00 ≤ l4.value) && decide (l4.value ≤ 0xDFFF)) = true by
+      rw [ite_eq_left (show (decide (0xDC00 ≤ l4.value) && decide (l4.value ≤ 0xDFFF)) = true by
         rw [hl4v]; simp only [Bool.and_eq_true, decide_eq_true_eq]; omega)]
       have hcomb : combineSurrogates h4.value l4.value = c.toNat := by
         rw [hh4v, hl4v, hcv]
@@ -923,7 +923,7 @@ theorem expect?_complete {p : s.Pos} {l u : List Char} (h : remaining p = l ++ u
       injection hc' with hcc hqq
       subst hcc
       subst hqq
-      rw [if_pos (beq_self_eq_true c), hr]
+      rw [ite_eq_left (beq_self_eq_true c), hr]
       exact ⟨_, rfl, hrp⟩
     · next hc => rw [hq] at hc; exact absurd hc (by simp)
 
@@ -1129,7 +1129,7 @@ private theorem value_num {p q : s.Pos} {c : Char} {r : Scanned Number p}
   · obtain ⟨rfl, -⟩ := heq
     exact absurd hd (by decide)
   · obtain ⟨rfl, -⟩ := heq
-    rw [if_pos hd, hnum]
+    rw [ite_eq_left hd, hnum]
 
 /--
 Seeing `[` and then `]`, the machine produces the empty array without opening a frame. The empty
@@ -1146,7 +1146,7 @@ private theorem value_arr_empty {p q after : s.Pos} (hc : step? p = some ('[', q
   rw [value]
   split <;> rename_i heq <;> rw [hc] at heq <;> simp at heq
   · subst heq
-    simp only [hd, Bool.false_eq_true, if_false]
+    simp only [hd, Bool.false_eq_true, ite_false]
     split <;> rename_i heq2 <;> rw [hb] at heq2 <;> simp at heq2
     · subst heq2
       rfl
@@ -1168,7 +1168,7 @@ private theorem value_arr_items {p q : s.Pos} (hc : step? p = some ('[', q))
   rw [value]
   split <;> rename_i heq <;> rw [hc] at heq <;> simp at heq
   · subst heq
-    simp only [hd, Bool.false_eq_true, if_false]
+    simp only [hd, Bool.false_eq_true, ite_false]
   · rename_i _ _ _ _ hn _
     exact absurd heq.1.symm hn
 
@@ -1187,7 +1187,7 @@ private theorem value_obj_empty {p q after : s.Pos} (hc : step? p = some ('{', q
   rw [value]
   split <;> rename_i heq <;> rw [hc] at heq <;> simp at heq
   · subst heq
-    simp only [hd, Bool.false_eq_true, if_false]
+    simp only [hd, Bool.false_eq_true, ite_false]
     split <;> rename_i heq2 <;> rw [hb] at heq2 <;> simp at heq2
     · subst heq2
       rfl
@@ -1210,7 +1210,7 @@ private theorem value_obj_members {p q : s.Pos} (hc : step? p = some ('{', q))
   rw [value]
   split <;> rename_i heq <;> rw [hc] at heq <;> simp at heq
   · subst heq
-    simp only [hd, Bool.false_eq_true, if_false]
+    simp only [hd, Bool.false_eq_true, ite_false]
   · rename_i _ _ _ _ _ hn
     exact absurd heq.1.symm hn
 
@@ -1333,7 +1333,7 @@ private theorem member_value {p q after : s.Pos} {fields : Array (String × Json
   rw [member]
   split <;> rename_i heq <;> rw [hc] at heq <;> simp at heq
   · subst heq
-    simp only [hstr, hdup, Bool.false_eq_true, if_false]
+    simp only [hstr, hdup, Bool.false_eq_true, ite_false]
     split <;> rename_i heq2 <;> rw [hb] at heq2 <;> simp at heq2
     · subst heq2
       rfl
@@ -2062,7 +2062,7 @@ private theorem parse_eq_parseFrom {cfg : Config} {j : Json} (h : Spec.TextOf s 
   | some cq =>
     obtain ⟨c, q⟩ := cq
     have hbom := head_ne_bom h' (remaining_step hc)
-    simp only [parse, hc, if_neg (by simp [hbom] : ¬(cfg.ignoreBOM && c.toNat == 0xFEFF) = true)]
+    simp only [parse, hc, ite_eq_right (by simp [hbom] : ¬(cfg.ignoreBOM && c.toNat == 0xFEFF) = true)]
 
 /--
 No false rejects: text the grammar derives is read, and read as the value the grammar gives it.

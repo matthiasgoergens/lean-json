@@ -213,7 +213,7 @@ theorem get?_set? : ∀ (p : Path) (j v j' : Json), j.set? p v = .ok j' → j'.g
             subst h
             have hlt : i < elems.size := (Array.getElem?_eq_some_iff.mp he).1
             rw [get?, Array.getElem?_setIfInBounds]
-            simp only [hlt, if_true]
+            simp only [hlt, ite_true]
             simpa using ih child v child' hc
       | null | bool _ | num _ | str _ | obj _ => simp [set?] at h
 

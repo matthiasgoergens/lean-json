@@ -211,10 +211,10 @@ private theorem digitCharsTo_nil (n : Nat) : ∀ acc, digitCharsTo n acc = digit
     intro acc
     rw [digitChars]
     by_cases hn : n < 10
-    · rw [digitCharsTo, if_pos hn, digitCharsTo, if_pos hn]
+    · rw [digitCharsTo, ite_eq_left hn, digitCharsTo, ite_eq_left hn]
       simp
-    · rw [digitCharsTo, if_neg hn, ih (n / 10) (by omega) (digitChar (n % 10) :: acc),
-        digitCharsTo, if_neg hn, ih (n / 10) (by omega) [digitChar (n % 10)]]
+    · rw [digitCharsTo, ite_eq_right hn, ih (n / 10) (by omega) (digitChar (n % 10) :: acc),
+        digitCharsTo, ite_eq_right hn, ih (n / 10) (by omega) [digitChar (n % 10)]]
       simp
 
 /--
@@ -229,7 +229,7 @@ prefix a spurious `digitChars 0`, namely `'0'`, to a single digit. The conclusio
 -/
 private theorem digitChars_cons (n : Nat) (h : ¬ n < 10) :
     digitChars n = digitChars (n / 10) ++ [digitChar (n % 10)] := by
-  rw [digitChars, digitCharsTo, if_neg h, digitCharsTo_nil]
+  rw [digitChars, digitCharsTo, ite_eq_right h, digitCharsTo_nil]
 
 /--
 Every number renders as at least one character. Stripping leading zeros has to leave something
@@ -241,7 +241,7 @@ or above a list ending in the last digit, neither of which can be empty.
 -/
 private theorem digitChars_ne_nil (n : Nat) : digitChars n ≠ [] := by
   by_cases hn : n < 10
-  · rw [digitChars, digitCharsTo, if_pos hn]; simp
+  · rw [digitChars, digitCharsTo, ite_eq_left hn]; simp
   · rw [digitChars_cons n hn]; simp
 
 /--
@@ -269,7 +269,7 @@ private theorem dropWhile_padDigits : ∀ (w n : Nat), n ≠ 0 → n < 10 ^ w �
     rw [padDigits]
     by_cases h10 : n < 10
     · rw [show n / 10 = 0 by omega, padDigits_zero, dropWhile_replicate_append,
-        show n % 10 = n by omega, digitChars, digitCharsTo, if_pos h10]
+        show n % 10 = n by omega, digitChars, digitCharsTo, ite_eq_left h10]
       simp [digitChar_ne_zero hn h10]
     · have hne : n / 10 ≠ 0 := by omega
       rw [dropWhile_append_of_ne_nil (by rw [ih (n / 10) hne hlt]; exact digitChars_ne_nil _),
@@ -337,7 +337,7 @@ identify with `digitChars n`.
   funext n
   rw [digitCharsFast]
   split
-  · next h => rw [h, digitChars, digitCharsTo, if_pos (by omega)]; rfl
+  · next h => rw [h, digitChars, digitCharsTo, ite_eq_left (by omega)]; rfl
   · next h => rw [renderExact_eq, List.append_nil, dropWhile_padDigits _ n h (widthBound_spec n)]
 
 def digitString (n : Nat) : String := String.ofList (digitChars n)

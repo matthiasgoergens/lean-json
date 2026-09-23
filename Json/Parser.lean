@@ -530,7 +530,7 @@ private theorem digits_go_step {start p q : s.Pos} {c : Char} (hc : step? p = so
     injection hc'' with h₁ h₂
     subst h₁
     subst h₂
-    rw [if_pos hd]
+    rw [ite_eq_left hd]
   · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
 
 /--
@@ -549,7 +549,7 @@ private theorem digits_go_stop {start p : s.Pos} (v n : Nat)
     digits.go start p v n h = ⟨(v, n), p, h⟩ := by
   rw [digits.go]
   split
-  · next c' q' hc' => rw [if_neg (by simp [hstop c' q' hc'])]
+  · next c' q' hc' => rw [ite_eq_right (by simp [hstop c' q' hc'])]
   · rfl
 
 /--
