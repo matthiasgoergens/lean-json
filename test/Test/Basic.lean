@@ -67,4 +67,20 @@ example : depth (.arr #[]) = 1 := by simp [depth, depthList]
 example : depth (.obj #[("a", .arr #[.num 1])]) = 2 := by
   simp [depth, depthList, depthFields]
 
+/-! ## Coercions -/
+
+-- What the numeric coercions buy: a variable, and not only a literal, sits in a `Json` position.
+example (n : Nat) (i : Int) : Json := mkObj [("n", n), ("i", i)]
+
+-- The literal path and the coercion path agree, at every literal rather than at one of them.
+example (n : Nat) : (OfNat.ofNat n : Json) = ((n : Json)) := rfl
+
+example (n : Nat) : (OfNat.ofNat n : Number) = ((n : Number)) := rfl
+
+-- `Nat` and `Int` reach `Json` directly and by way of `Number`; the two routes must denote the
+-- same value, or which one elaboration picks would be visible.
+example (n : Nat) : ((n : Json)) = (((n : Number) : Json)) := rfl
+
+example (i : Int) : ((i : Json)) = (((i : Number) : Json)) := rfl
+
 end Test.Basic

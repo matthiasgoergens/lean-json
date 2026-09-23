@@ -425,6 +425,9 @@ def ofNat (n : Nat) : Number := ofInt n
 
 instance : OfNat Number n := ⟨ofNat n⟩
 
+instance : Coe Nat Number := ⟨ofNat⟩
+instance : Coe Int Number := ⟨ofInt⟩
+
 instance : Neg Number := ⟨fun n => ⟨-n.mantissa, n.exponent⟩⟩
 
 /-- Multiply by a power of ten, which only ever adjusts the exponent. -/

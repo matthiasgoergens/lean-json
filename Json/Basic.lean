@@ -304,14 +304,16 @@ nested value costs memory rather than crashing.
 
 instance : Hashable Json := ⟨hash⟩
 
-instance : Coe Bool Json := ⟨bool⟩
-instance : Coe String Json := ⟨str⟩
-instance : Coe Number Json := ⟨num⟩
-instance : OfNat Json n := ⟨num (Number.ofNat n)⟩
-
 def ofInt (i : Int) : Json := num (Number.ofInt i)
 
 def ofNat (n : Nat) : Json := num (Number.ofNat n)
+
+instance : Coe Bool Json := ⟨bool⟩
+instance : Coe String Json := ⟨str⟩
+instance : Coe Number Json := ⟨num⟩
+instance : Coe Nat Json := ⟨ofNat⟩
+instance : Coe Int Json := ⟨ofInt⟩
+instance : OfNat Json n := ⟨num (Number.ofNat n)⟩
 
 def mkObj (fields : List (String × Json)) : Json := obj fields.toArray
 

@@ -6,7 +6,7 @@ import Lake
 open Lake DSL
 
 package test where
-  version := v!"0.2.1"
+  version := v!"0.3.0"
   leanOptions := #[⟨`warningAsError, true⟩]
 
 require jsonDeriving from ".."
