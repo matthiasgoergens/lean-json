@@ -6,7 +6,7 @@ import Lake
 open Lake DSL
 
 package test where
-  version := v!"0.3.0"
+  version := v!"0.3.1"
   leanOptions := #[⟨`warningAsError, true⟩]
 
 require json from ".."

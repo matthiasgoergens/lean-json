@@ -1,7 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.1] - 2026-10-18
 
+* Chore: bump dependencies
 * Update the core library, deriving package, tests, and benchmarks for Lean 4.34.0; the optional LeanIO adapter is not included.
 
 ## [0.3.0] - 2026-08-31
