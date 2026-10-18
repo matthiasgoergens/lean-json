@@ -216,11 +216,11 @@ private theorem digitCharsTo_eq (n : Nat) : ∀ acc, digitCharsTo n acc = digitC
   | _ n ih =>
     intro acc
     by_cases h : n < 10
-    · rw [digitCharsTo, if_pos h, digitChars, digitCharsTo, if_pos h]
+    · rw [digitCharsTo, ite_eq_left h, digitChars, digitCharsTo, ite_eq_left h]
       simp
     · have hr : digitChars n = digitCharsTo (n / 10) [digitChar (n % 10)] := by
-        rw [digitChars, digitCharsTo, if_neg h]
-      rw [digitCharsTo, if_neg h, hr, ih (n / 10) (by omega), ih (n / 10) (by omega)]
+        rw [digitChars, digitCharsTo, ite_eq_right h]
+      rw [digitCharsTo, ite_eq_right h, hr, ih (n / 10) (by omega), ih (n / 10) (by omega)]
       simp
 
 /--
@@ -232,7 +232,7 @@ one-element list. Above ten the equation is false, the rendering then having mor
 character, so the hypothesis is doing real work.
 -/
 private theorem digitChars_of_lt {n : Nat} (h : n < 10) : digitChars n = [digitChar n] := by
-  rw [digitChars, digitCharsTo, if_pos h]
+  rw [digitChars, digitCharsTo, ite_eq_left h]
 
 /--
 A number of two digits or more is written as its leading digits followed by its last. This is the
@@ -245,7 +245,7 @@ applied to a single digit, where `n / 10` is zero and the left part would be a s
 -/
 private theorem digitChars_of_le {n : Nat} (h : 10 ≤ n) :
     digitChars n = digitChars (n / 10) ++ [digitChar (n % 10)] := by
-  rw [digitChars, digitCharsTo, if_neg (by omega), digitCharsTo_eq]
+  rw [digitChars, digitCharsTo, ite_eq_right (by omega), digitCharsTo_eq]
 
 /--
 Every number is written as at least one character. The grammar's `1*DIGIT` requires a digit, so a
@@ -500,7 +500,7 @@ exponent beyond them, written either as `0.` with zeros or with `e-`.
 private theorem spec_num (n : Number) (r : List Char) :
     Spec.Num ((number n).toList ++ r) (Number.normalize n.mantissa n.exponent) r := by
   by_cases hm : n.mantissa = 0
-  · simp only [number, if_pos hm]
+  · simp only [number, ite_eq_left hm]
     have hz : Number.normalize n.mantissa n.exponent = Number.normalize 0 0 := by
       simp [Number.normalize, hm]
     rw [hz]
@@ -509,9 +509,9 @@ private theorem spec_num (n : Number) (r : List Char) :
   · have hd := isDigit_of_mem_digitChars n.mantissa.natAbs
     have hval := digitsValue_digitChars n.mantissa.natAbs
     have hhead := head_digitChars (show 1 ≤ n.mantissa.natAbs by omega)
-    simp only [number, if_neg hm]
+    simp only [number, ite_eq_right hm]
     by_cases he0 : n.exponent = 0
-    · rw [if_pos he0]
+    · rw [ite_eq_left he0]
       simp only [String.toList_append, String.toList_ofList, toList_sign, List.append_assoc]
       refine spec_num_of (hval ▸ spec_int' hd hhead r) Spec.Frac.absent Spec.Exp.absent ?_
       rw [he0]
@@ -520,13 +520,13 @@ private theorem spec_num (n : Number) (r : List Char) :
       omega
     · have hsign : (if n.mantissa < 0 then -((n.mantissa.natAbs : Int))
           else ((n.mantissa.natAbs : Int))) = n.mantissa := by
-        by_cases h : n.mantissa < 0 <;> simp only [h, if_true, if_false] <;> omega
-      rw [if_neg he0]
+        by_cases h : n.mantissa < 0 <;> simp only [h, ite_true, ite_false] <;> omega
+      rw [ite_eq_right he0]
       by_cases hpos : 0 < n.exponent
-      · rw [if_pos hpos]
+      · rw [ite_eq_left hpos]
         by_cases hlim : n.exponent ≤ (plainZeroLimit : Int)
         · -- Plain decimal with trailing zeros: the padding belongs to the integer part.
-          rw [if_pos hlim]
+          rw [ite_eq_left hlim]
           simp only [String.toList_append, String.toList_ofList, toList_sign, zeros,
             List.append_assoc]
           obtain ⟨c, cs, hc, hrange⟩ := hhead
@@ -547,17 +547,17 @@ private theorem spec_num (n : Number) (r : List Char) :
               else ((n.mantissa.natAbs * 10 ^ n.exponent.toNat : Nat) : Int))
               = n.mantissa * 10 ^ n.exponent.toNat := by
             by_cases h : n.mantissa < 0
-            · simp only [if_pos h, Int.natCast_mul, Int.natCast_pow, ← Int.neg_mul]
+            · simp only [ite_eq_left h, Int.natCast_mul, Int.natCast_pow, ← Int.neg_mul]
               congr 1
               omega
-            · simp only [if_neg h, Int.natCast_mul, Int.natCast_pow]
+            · simp only [ite_eq_right h, Int.natCast_mul, Int.natCast_pow]
               congr 1
               omega
           rw [hcast, show ((0 : Int) - ((0 : Nat) : Int)) = 0 from by omega, normalize_mul_pow]
           congr 1
           omega
         · -- Exponent notation, the padding being too long to write out.
-          rw [if_neg hlim, if_neg (show ¬n.exponent < 0 by omega)]
+          rw [ite_eq_right hlim, ite_eq_right (show ¬n.exponent < 0 by omega)]
           simp only [String.toList_append, String.toList_ofList, toList_sign, digitString,
             List.append_assoc]
           refine spec_num_of (hval ▸ spec_int' hd hhead _) Spec.Frac.absent
@@ -570,7 +570,7 @@ private theorem spec_num (n : Number) (r : List Char) :
           omega
       · by_cases hk : (-n.exponent).toNat < (digitChars n.mantissa.natAbs).length
         · -- A decimal point inside the digits.
-          rw [if_neg hpos, if_pos hk]
+          rw [ite_eq_right hpos, ite_eq_left hk]
           simp only [String.toList_append, String.toList_ofList, toList_sign, List.append_assoc]
           obtain ⟨c, cs, hc, hrange⟩ := hhead
           obtain ⟨j, hjdef⟩ : ∃ j, (digitChars n.mantissa.natAbs).length -
@@ -601,7 +601,7 @@ private theorem spec_num (n : Number) (r : List Char) :
         · by_cases hz : (-n.exponent).toNat - (digitChars n.mantissa.natAbs).length
               ≤ plainZeroLimit
           · -- A zero integer part, and a fraction that starts with padding.
-            rw [if_neg hpos, if_neg hk, if_pos hz]
+            rw [ite_eq_right hpos, ite_eq_right hk, ite_eq_left hz]
             simp only [String.toList_append, String.toList_ofList, toList_sign, zeros,
               List.append_assoc]
             refine spec_num_of Spec.Int'.zero
@@ -619,7 +619,7 @@ private theorem spec_num (n : Number) (r : List Char) :
             congr 1
             omega
           · -- Exponent notation again, this time with a negative exponent.
-            rw [if_neg hpos, if_neg hk, if_neg hz, if_pos (show n.exponent < 0 by omega)]
+            rw [ite_eq_right hpos, ite_eq_right hk, ite_eq_right hz, ite_eq_left (show n.exponent < 0 by omega)]
             simp only [String.toList_append, String.toList_ofList, toList_sign, digitString,
               List.append_assoc]
             refine spec_num_of (hval ▸ spec_int' hd hhead _) Spec.Frac.absent
@@ -860,7 +860,7 @@ private theorem spec_value (st : Style) (d : Nat) : ∀ (j : Json), canonicalNum
       have hchars : chars st d (.arr elems) =
           ("[" ++ st.lineBreak (d + 1)).toList ++ elemChars st (d + 1) elems.toList true ++
             (st.lineBreak d ++ "]").toList := by
-        rw [chars, if_neg he]
+        rw [chars, ite_eq_right he]
       rw [hchars]
       simpa [String.toList_append, List.append_assoc] using harr
   | .obj fields, h, r => by
@@ -885,7 +885,7 @@ private theorem spec_value (st : Style) (d : Nat) : ∀ (j : Json), canonicalNum
       have hchars : chars st d (.obj fields) =
           ("{" ++ st.lineBreak (d + 1)).toList ++ memberChars st (d + 1) fields.toList true ++
             (st.lineBreak d ++ "}").toList := by
-        rw [chars, if_neg he]
+        rw [chars, ite_eq_right he]
       rw [hchars]
       simpa [String.toList_append, List.append_assoc] using hobj
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+* Update the core library, deriving package, tests, and benchmarks for Lean 4.34.0; the optional LeanIO adapter is not included.
+
 ## [0.3.0] - 2026-08-31
 
 * Coercions from `Nat` and `Int` to `Json` and to `Number`

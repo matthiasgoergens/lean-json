@@ -413,11 +413,11 @@ private theorem distinctNamesGo (a : Array (String × α)) (i : Nat) (seen : Std
       ((fieldNames a).drop i).Nodup ∧ ∀ x ∈ (fieldNames a).drop i, seen.contains x = false := by
   induction i, seen using distinctNames.go.induct (fields := a) with
   | case1 i seen h k hc =>
-    rw [distinctNames.go, dif_pos h, if_pos hc, fieldNames_drop a h]
+    rw [distinctNames.go, dite_eq_left h, ite_eq_left hc, fieldNames_drop a h]
     have hmem : a[i].1 ∈ seen := by simpa using hc
     simp [hmem]
   | case2 i seen h k hc ih =>
-    rw [distinctNames.go, dif_pos h, if_neg hc, ih, fieldNames_drop a h]
+    rw [distinctNames.go, dite_eq_left h, ite_eq_right hc, ih, fieldNames_drop a h]
     simp only [Std.HashSet.contains_insert]
     grind
   | case3 i seen h =>
@@ -425,7 +425,7 @@ private theorem distinctNamesGo (a : Array (String × α)) (i : Nat) (seen : Std
       apply List.drop_eq_nil_of_le
       rw [fieldNames_length]
       omega
-    rw [distinctNames.go, dif_neg h]
+    rw [distinctNames.go, dite_eq_right h]
     simp [hnil]
 
 /--
