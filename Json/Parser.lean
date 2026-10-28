@@ -988,23 +988,91 @@ private theorem string_go_run (start p : s.Pos) :
     rw [String.extract_eq_copy_slice _ _ (String.Pos.le_refl _), String.copy_slice_self,
       String.append_empty]
 
+/--
+Whether the byte at `e` is a quotation mark. Only a whole character can be, so this is how the
+end of a string is recognised without decoding it.
+-/
+@[inline]
+def quoteAt (e : s.Pos) : Bool :=
+  if h : e.offset.byteIdx < s.utf8ByteSize then s.getUTF8Byte e.offset h == 0x22 else false
+
+/--
+A quotation mark found at `e` is a character, so `e` is not the end of the text. The closing
+quotation mark is passed with `String.Pos.next`, which needs this.
+
+`h : quoteAt e = true` says the byte at `e` is `0x22`, and `e ≠ s.endPos` says `e` is not the
+end. At the end there is no byte, and `quoteAt` answers `false`.
+-/
+theorem quoteAt_ne {e : s.Pos} (h : quoteAt e = true) : e ≠ s.endPos := by
+  intro he
+  subst he
+  simp [quoteAt] at h
+
+/--
+A quotation mark byte is the closing quotation mark as `stringStep` reads it. This is what lets
+`stringFast` end a string on the byte alone.
+
+`h` says the byte at `e` is `0x22`. The conclusion is that `stringStep e` reports the end of the
+string, with the position just past `e`. The byte is the first of the character at `e` by
+`byte_get`; a character of more than one byte starts with a byte of at least `0x80` by
+`utf8EncodeChar_ge`, so this one is a single byte with code point `0x22`, which is `'"'`, and
+`stringStep` reads that as the end.
+-/
+private theorem stringStep_quoteAt {e : s.Pos} (h : quoteAt e = true) :
+    stringStep e = .done (e.next (quoteAt_ne h)) := by
+  have hp := quoteAt_ne h
+  have hlt : e.offset.byteIdx < s.utf8ByteSize := by
+    unfold quoteAt at h
+    split at h
+    · assumption
+    · simp at h
+  have hbyte : s.toByteArray[e.offset.byteIdx]'(by simpa using hlt) = 0x22 := by
+    unfold quoteAt at h
+    rw [dite_eq_left hlt] at h
+    simpa [String.getUTF8Byte_eq_getElem] using h
+  have hb := byte_get hp (k := 0) (Char.utf8Size_pos _) (by simpa using hlt)
+  simp only [Nat.add_zero] at hb
+  rw [hb] at hbyte
+  have h1 : (e.get hp).utf8Size = 1 := by
+    apply Classical.byContradiction
+    intro h1
+    have := utf8EncodeChar_ge h1 0 (by simp [Char.utf8Size_pos])
+    rw [hbyte] at this
+    exact absurd this (by decide)
+  simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero] at hbyte
+  have hc : e.get hp = '"' := by
+    rw [← Char.toNat_inj]
+    have := (toNat_toUInt8 h1).1
+    rw [hbyte] at this
+    simpa using this.symm
+  have hs : step? e = some ('"', e.next hp) := by rw [step?, dite_eq_right hp, hc]
+  rw [stringStep, hs]
+  rfl
+
 def stringFast (start : s.Pos) (acc : String) : Except Error (Scanned String start) :=
   go start acc (Nat.le_refl _)
 where
   go (p : s.Pos) (acc : String) (h : p.remainingBytes ≤ start.remainingBytes) :
       Except Error (Scanned String start) :=
-    match hs : stringStep (unescapedEnd p) with
-    | .fail e => .error e
-    | .done q =>
-      .ok ⟨appendRun acc p (unescapedEnd p), q, by
-        have := stringStep_done_lt _ q hs; have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
-          scanWhile_le _ p
+    if hq : quoteAt (unescapedEnd p) then
+      .ok ⟨appendRun acc p (unescapedEnd p), (unescapedEnd p).next (quoteAt_ne hq), by
+        have := (String.Pos.lt_iff_remainingBytes_lt _ _).mp
+          (String.Pos.lt_next (h := quoteAt_ne hq))
+        have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
         omega⟩
-    | .char c q =>
-      go q ((appendRun acc p (unescapedEnd p)).push c) (by
-        have := stringStep_char_lt _ c q hs; have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
-          scanWhile_le _ p
-        omega)
+    else
+      match hs : stringStep (unescapedEnd p) with
+      | .fail e => .error e
+      | .done q =>
+        .ok ⟨appendRun acc p (unescapedEnd p), q, by
+          have := stringStep_done_lt _ q hs
+          have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+          omega⟩
+      | .char c q =>
+        go q ((appendRun acc p (unescapedEnd p)).push c) (by
+          have := stringStep_char_lt _ c q hs
+          have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+          omega)
   termination_by p.remainingBytes
   decreasing_by
     have := stringStep_char_lt _ c q hs
@@ -1027,13 +1095,25 @@ private theorem stringFast_go_eq (start p : s.Pos) (acc : String)
   have hrun := fun p acc (h : p.remainingBytes ≤ start.remainingBytes) =>
     string_go_run start p acc h (Nat.le_trans (scanWhile_le _ p) h)
   fun_induction stringFast.go start p acc h with
-  | case1 p acc h err hs =>
+  | case1 p acc h hq =>
+    rw [hrun, string.go]
+    have hs := stringStep_quoteAt hq
+    simp only [unescapedEnd] at hs
+    split
+    · next e hs' => rw [hs] at hs'; simp at hs'
+    · next r hs' =>
+      rw [hs] at hs'
+      injection hs' with hh
+      subst hh
+      simp only [appendRun_eq, unescapedEnd]
+    · next c r hs' => rw [hs] at hs'; simp at hs'
+  | case2 p acc h hq err hs =>
     rw [hrun, string.go]
     split
     · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; injection hs' with hh; subst hh; rfl
     · next r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
     · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
-  | case2 p acc h q hs =>
+  | case3 p acc h hq q hs =>
     rw [hrun, string.go]
     split
     · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
@@ -1044,7 +1124,7 @@ private theorem stringFast_go_eq (start p : s.Pos) (acc : String)
       subst hh
       simp only [appendRun_eq, unescapedEnd]
     · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
-  | case3 p acc h c q hs ih =>
+  | case4 p acc h hq c q hs ih =>
     rw [hrun, string.go]
     split
     · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
