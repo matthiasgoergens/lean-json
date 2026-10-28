@@ -502,9 +502,33 @@ def digitList (start p : s.Pos) (acc : List Nat)
 termination_by p.remainingBytes
 decreasing_by exact step?_lt hc
 
+/-- At most `k` more digits, folded in as `digits.go` folds them. -/
+def digitsUpTo (start p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes) :
+    Nat → Consumed (Nat × Nat) start
+  | 0 => ⟨(v, n), p, h⟩
+  | k + 1 =>
+    match hc : step? p with
+    | some (c, q) =>
+      if Spec.isDigit c then
+        digitsUpTo start q (v * 10 + Spec.digitVal c) (n + 1) (by have := step?_lt hc; omega) k
+      else
+        ⟨(v, n), p, h⟩
+    | none => ⟨(v, n), p, h⟩
+
+/--
+How many digits after the first are read by folding before the rest of a run is handed to the
+halving reader. Every number a parse sees starts with one digit already read, so a run of up to
+eighteen is folded into a value below `2 ^ 63`, which needs no allocation, and only longer runs
+pay for building a list.
+-/
+def foldedDigits : Nat := 17
+
 def digitsFast (start : s.Pos) (value count : Nat) : Consumed (Nat × Nat) start :=
-  match digitList start start [] (Nat.le_refl _) with
-  | ⟨ds, pos, h⟩ => ⟨digitJoin (value, count) (fromDigits ds.reverse), pos, h⟩
+  let r := digitsUpTo start start value count (Nat.le_refl _) foldedDigits
+  if r.value.2 < count + foldedDigits then r
+  else
+    let l := digitList start r.pos [] r.notLonger
+    ⟨digitJoin r.value (fromDigits l.value.reverse), l.pos, l.notLonger⟩
 
 /--
 One turn of the digit loop reads one digit and carries on from the next position. `digits.go`
@@ -601,23 +625,86 @@ private theorem digits_go_eq (start : s.Pos) (v c : Nat) :
     exact absurd hcq (by simp)
 
 /--
+Folding up to `k` digits and then carrying on with the loop is the loop: `digitsUpTo` runs the
+same steps as `digits.go`, so the loop resumed where it stopped ends where the loop alone would.
+-/
+private theorem digits_go_upTo (start : s.Pos) :
+    ∀ (k : Nat) (p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes),
+      digits.go start p v n h =
+        digits.go start (digitsUpTo start p v n h k).pos (digitsUpTo start p v n h k).value.1
+          (digitsUpTo start p v n h k).value.2 (digitsUpTo start p v n h k).notLonger := by
+  intro k
+  induction k with
+  | zero => intro p v n h; rfl
+  | succ k ih =>
+    intro p v n h
+    rw [digitsUpTo]
+    split
+    · next c q hc =>
+      split
+      · next hd =>
+        rw [digits_go_step hc hd v n h (by have := step?_lt hc; omega)]
+        exact ih _ _ _ _
+      · rfl
+    · rfl
+
+/--
+When `digitsUpTo` returns before using up its `k` digits, it stopped where the digits do: what
+follows, if anything, is not a digit, so the loop has nothing more to read there.
+-/
+private theorem digitsUpTo_stop (start : s.Pos) :
+    ∀ (k : Nat) (p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes),
+      (digitsUpTo start p v n h k).value.2 < n + k →
+      ∀ c q, step? (digitsUpTo start p v n h k).pos = some (c, q) → Spec.isDigit c = false := by
+  intro k
+  induction k with
+  | zero => intro p v n h hlt; simp [digitsUpTo] at hlt
+  | succ k ih =>
+    intro p v n h
+    rw [digitsUpTo]
+    split
+    · next c' q' hc =>
+      split
+      · next hd => intro hlt; exact ih _ _ _ _ (by omega)
+      · next hd =>
+        intro _ c q hcq
+        rw [hc] at hcq
+        injection hcq with hcq'
+        injection hcq' with hcc _
+        rw [← hcc]
+        simpa using hd
+    · next hc =>
+      intro _ c q hcq
+      rw [hc] at hcq
+      exact absurd hcq (by simp)
+
+/--
 The two digit readers agree from a fresh start, which is the instance that matters: it is what
 lets the fast one replace the one every proof about numbers is written against. `digitsFast` is
 where reading a long number stopped costing time quadratic in its digits.
 
-`digitsFast start value count` collects the digits into a list and reads them by repeated halving;
-`digits start value count` folds them one at a time. Equality is of the whole `Consumed` record,
-so the value, the digit count and the stopping position all agree, and the two are interchangeable
-wherever either appears. It is `digits_go_eq` at the empty accumulator, where
-`digitJoin (value, count) (fromDigits [])` collapses to `(value, count)`.
+`digitsFast start value count` folds up to `foldedDigits` digits, then collects any that remain
+into a list and reads them by repeated halving; `digits start value count` folds them all one at a
+time. Equality is of the whole `Consumed` record, so the value, the digit count and the stopping
+position all agree, and the two are interchangeable wherever either appears. A run that ends
+early is `digits_go_stop` where the folding stopped; a longer one is `digits_go_eq` from there, at
+the empty accumulator, where `digitJoin (v, c) (fromDigits [])` collapses to `(v, c)`.
 -/
 theorem digitsFast_eq (start : s.Pos) (value count : Nat) :
     digitsFast start value count = digits start value count := by
-  have hgo := digits_go_eq start value count start [] (Nat.le_refl _)
-  rw [show digitJoin (value, count) (fromDigits ([] : List Nat).reverse) = (value, count) from by
-    simp [digitJoin, fromDigits]] at hgo
-  rw [digits, digitsFast]
-  exact hgo.symm
+  rw [digits, digits_go_upTo start foldedDigits]
+  unfold digitsFast
+  simp only
+  split
+  · next hlt => rw [digits_go_stop _ _ _ (digitsUpTo_stop start foldedDigits _ _ _ _ hlt)]
+  · have hgo := digits_go_eq start
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).value.1
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).value.2
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).pos []
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).notLonger
+    rw [show ∀ v c, digitJoin (v, c) (fromDigits ([] : List Nat).reverse) = (v, c) from by
+      simp [digitJoin, fromDigits]] at hgo
+    exact hgo.symm
 
 /--
 The compiler is told to run the fast reader in place of the one the library is stated in terms of.
