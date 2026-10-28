@@ -382,6 +382,283 @@ def number (n : Number) : String :=
       else
         sign ++ exponentForm
 
+/-!
+`number` builds its text from lists of characters and several intermediate strings, and finds a
+number's digits by halving, which computes powers of ten as arbitrary-precision numbers even for a
+number of two digits. What runs instead writes onto the text already accumulated, and takes digits
+off one at a time while the number fits a machine word, where a division is cheap.
+-/
+
+/-- `acc` followed by the decimal digits of `n`. Quadratic in the digits of a long number. -/
+def pushDigits (acc : String) (n : Nat) : String :=
+  if n < 10 then acc.push (digitChar n) else (pushDigits acc (n / 10)).push (digitChar (n % 10))
+termination_by n
+decreasing_by omega
+
+/--
+`acc` followed by the last `w` decimal digits of `n`, leading zeros included. Width one is a case
+of its own so that the compiler takes `acc` as owned rather than borrowed; borrowed, every push
+would copy the whole accumulated text.
+-/
+def pushPadDigits (acc : String) (n : Nat) : Nat → String
+  | 0 => acc
+  | 1 => acc.push (digitChar (n % 10))
+  | w + 2 => (pushPadDigits acc (n / 10) (w + 1)).push (digitChar (n % 10))
+
+/--
+Numbers below this are written a digit at a time; it is `10 ^ 18`, below `2 ^ 63`. Inlined, a
+literal this large would be rebuilt from its decimal digits at every use.
+-/
+@[noinline] def smallBound : Nat := 1000000000000000000
+
+def digitsTo (acc : String) (n : Nat) : String :=
+  if n < smallBound then pushDigits acc n else acc ++ digitString n
+
+def digitCount (n : Nat) : Nat :=
+  if n < 10 then 1 else digitCount (n / 10) + 1
+termination_by n
+decreasing_by omega
+
+def pow10 : Nat → Nat
+  | 0 => 1
+  | k + 1 => pow10 k * 10
+
+/-- `acc ++ number n`, written onto `acc` while the mantissa is below `smallBound`. -/
+def numberTo (acc : String) (n : Number) : String :=
+  if n.mantissa = 0 then
+    acc.push '0'
+  else
+    let m := n.mantissa.natAbs
+    if m < smallBound then
+      let acc := if n.mantissa < 0 then acc.push '-' else acc
+      if n.exponent = 0 then
+        pushDigits acc m
+      else if 0 < n.exponent then
+        if n.exponent ≤ (plainZeroLimit : Int) then (pushDigits acc m).pushn '0' n.exponent.toNat
+        else digitsTo ((pushDigits acc m).push 'e') n.exponent.toNat
+      else
+        let k := (-n.exponent).toNat
+        let len := digitCount m
+        if k < len then
+          pushPadDigits ((pushDigits acc (m / pow10 k)).push '.') m k
+        else if k - len ≤ plainZeroLimit then
+          pushDigits ((((acc.push '0').push '.').pushn '0' (k - len))) m
+        else
+          digitsTo (((pushDigits acc m).push 'e').push '-') k
+    else
+      acc ++ number n
+
+def numberFast (n : Number) : String := numberTo "" n
+
+/--
+Pushing a character `n` times appends `n` copies of it. The fast number writer pads with
+`String.pushn`, while `number` pads with `zeros`, a string built from a list.
+
+`s.pushn c n` pushes `c` onto `s` `n` times, and the equation gives its characters as those of
+`s` followed by `List.replicate n c`. The induction is on `n`, through `String.pushn`'s definition
+as an iterated push.
+-/
+private theorem toList_pushn (s : String) (c : Char) (n : Nat) :
+    (s.pushn c n).toList = s.toList ++ List.replicate n c := by
+  rw [String.pushn_eq_repeat_push]
+  induction n with
+  | zero => simp [Nat.repeat]
+  | succ n ih => simp [Nat.repeat, ih, List.replicate_succ']
+
+/--
+Writing digits one at a time onto a string appends exactly `digitChars n`. Every claim about the
+grammar is stated against `digitChars`, so this is what lets the fast writer stand in for it.
+
+`(pushDigits acc n).toList` is the text the fast writer produces, and the equation says it is
+`acc`'s characters followed by `digitChars n`, for every `n`, however long. The induction is
+strong recursion on `n`, following the division by ten, with `digitChars_cons` peeling the same
+last digit off the right-hand side.
+-/
+private theorem toList_pushDigits (acc : String) (n : Nat) :
+    (pushDigits acc n).toList = acc.toList ++ digitChars n := by
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    rw [pushDigits]
+    by_cases h : n < 10
+    · rw [ite_eq_left h, digitChars, digitCharsTo, ite_eq_left h]; simp
+    · rw [ite_eq_right h, String.toList_push, ih (n / 10) (by omega), digitChars_cons n h]; simp
+
+/--
+Writing a fixed width of digits onto a string appends exactly `padDigits n w`. The fast writer
+uses it for the digits after a decimal point, which keep their leading zeros.
+
+`(pushPadDigits acc n w).toList` is what the writer produces, and `padDigits n w` is the last `w`
+digits of `n`, zeros included. The induction is on `w`, and both sides recurse on `n / 10` in
+step.
+-/
+private theorem toList_pushPadDigits (acc : String) (n w : Nat) :
+    (pushPadDigits acc n w).toList = acc.toList ++ padDigits n w := by
+  induction w generalizing n with
+  | zero => simp [pushPadDigits, padDigits]
+  | succ w ih =>
+    cases w with
+    | zero => simp [pushPadDigits, padDigits]
+    | succ w =>
+      rw [pushPadDigits, String.toList_push, ih, List.append_assoc]
+      conv => rhs; rw [padDigits]
+
+/--
+`digitsTo` appends the digits of `n` whichever way it writes them. Small numbers are written a
+digit at a time and large ones through `digitString`, which halves, and both give `digitChars n`.
+
+`(digitsTo acc n).toList` is the text produced, and the equation gives it as `acc`'s characters
+followed by `digitChars n`, with no condition on `n`: the bound only chooses the method.
+-/
+private theorem toList_digitsTo (acc : String) (n : Nat) :
+    (digitsTo acc n).toList = acc.toList ++ digitChars n := by
+  rw [digitsTo]
+  split
+  · exact toList_pushDigits acc n
+  · simp [digitString]
+
+/--
+`digitCount` counts the characters `digitChars` produces. The fast writer compares the exponent
+with this count, where `number` compares it with the length of the list of digits.
+
+`digitCount n = (digitChars n).length` holds for every `n`, zero included, which has one digit.
+The induction is strong recursion on `n`, both sides adding one for each division by ten.
+-/
+private theorem digitCount_eq (n : Nat) : digitCount n = (digitChars n).length := by
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    rw [digitCount]
+    by_cases h : n < 10
+    · rw [ite_eq_left h, digitChars, digitCharsTo, ite_eq_left h]; rfl
+    · rw [ite_eq_right h, ih (n / 10) (by omega), digitChars_cons n h]; simp
+
+/--
+`pow10` is ten to the power `k`. The fast writer multiplies its way to the power it divides by,
+where `Nat.pow` would compute it as an arbitrary-precision number.
+
+`pow10 k = 10 ^ k` for every `k`, by induction on `k`, both sides multiplying by ten at each step.
+-/
+private theorem pow10_eq (k : Nat) : pow10 k = 10 ^ k := by
+  induction k with
+  | zero => rfl
+  | succ k ih => rw [pow10, ih, Nat.pow_succ]
+
+/--
+A fixed-width block of digits has exactly that many characters. Splitting a number's digits at a
+decimal point needs the length of the part after it.
+
+`(padDigits n w).length = w` holds for every `n`, the block keeping leading zeros. The induction
+is on `w`.
+-/
+private theorem length_padDigits (n w : Nat) : (padDigits n w).length = w := by
+  induction w generalizing n with
+  | zero => rfl
+  | succ w ih => simp [padDigits, ih]
+
+/--
+A number of at least `k + 1` digits is written as its digits above the last `k`, followed by those
+last `k` as a fixed-width block. This is how the fast writer splits a mantissa at a decimal point,
+by division rather than by cutting a list.
+
+`h : 10 ^ k ≤ n` says `n` has more than `k` digits, so the high part `n / 10 ^ k` is not zero and
+contributes its own digits; without it the high part would be written as a spurious `0`. The
+induction is on `k`, peeling one digit off the right of both sides.
+-/
+private theorem digitChars_split : ∀ (k n : Nat), 10 ^ k ≤ n →
+    digitChars n = digitChars (n / 10 ^ k) ++ padDigits n k := by
+  intro k
+  induction k with
+  | zero => intro n _; simp [padDigits]
+  | succ k ih =>
+    intro n h
+    have h10 : ¬ n < 10 := by
+      have := Nat.le_self_pow (Nat.succ_ne_zero k) 10
+      omega
+    have hk : 10 ^ k ≤ n / 10 := by
+      rw [Nat.le_div_iff_mul_le (by omega), ← Nat.pow_succ]; exact h
+    rw [digitChars_cons n h10, ih (n / 10) hk, padDigits, Nat.div_div_eq_div_mul,
+      Nat.mul_comm 10 (10 ^ k), ← Nat.pow_succ, List.append_assoc]
+
+/--
+A non-zero number with more than `k` digits is at least `10 ^ k`. This turns the fast writer's
+comparison of `k` with the digit count into the bound `digitChars_split` needs.
+
+`hn : n ≠ 0` is needed because zero is written as one digit while being below `10 ^ 0`. `hk` says
+`k` is less than the number of digits. The induction is strong recursion on `n`.
+-/
+private theorem pow_le_of_lt_length : ∀ (n k : Nat), n ≠ 0 → k < (digitChars n).length →
+    10 ^ k ≤ n := by
+  intro n
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    intro k hn hk
+    by_cases h : n < 10
+    · rw [digitChars, digitCharsTo, ite_eq_left h] at hk
+      simp at hk
+      subst hk
+      simp; omega
+    · rw [digitChars_cons n h] at hk
+      simp at hk
+      cases k with
+      | zero => simp; omega
+      | succ k =>
+        have := ih (n / 10) (by omega) k (by omega) (by omega)
+        rw [Nat.pow_succ]
+        omega
+
+/--
+Writing a number onto the accumulated text is appending its spelling. Every claim tying numbers to
+the grammar is about `number`, and what runs is `numberTo`; this makes them one program.
+
+`numberTo acc n = acc ++ number n` holds for every accumulator and number. Below `smallBound` the
+proof follows `number`'s cases one by one, matching each piece of text through the lemmas above;
+from `smallBound` up, `numberTo` is that append by definition.
+-/
+private theorem numberTo_eq (acc : String) (n : Number) : numberTo acc n = acc ++ number n := by
+  rw [numberTo, number]
+  by_cases h0 : n.mantissa = 0
+  · simp only [h0, ite_true]; rw [← String.toList_inj]; simp
+  simp only [h0, ite_false]
+  by_cases hs : ¬ n.mantissa.natAbs < smallBound
+  · simp [hs]
+  simp only [Decidable.not_not] at hs
+  simp only [hs, ite_true]
+  rw [← String.toList_inj]
+  have hsign : (if n.mantissa < 0 then acc.push '-' else acc).toList =
+      acc.toList ++ (if n.mantissa < 0 then "-" else "").toList := by
+    split <;> simp
+  by_cases he : n.exponent = 0
+  · simp [he, toList_pushDigits, hsign]
+  by_cases hp : 0 < n.exponent
+  · by_cases hz : n.exponent ≤ (plainZeroLimit : Int)
+    · simp [he, hp, hz, toList_pushDigits, toList_pushn, hsign, zeros]
+    · have hn : ¬ n.exponent < 0 := by omega
+      simp [he, hp, hz, hn, toList_pushDigits, toList_digitsTo, hsign, digitString]
+  · have hn : n.exponent < 0 := by omega
+    simp only [he, hp, ite_false, hn, ite_true, ← digitCount_eq]
+    by_cases hk : (-n.exponent).toNat < digitCount n.mantissa.natAbs
+    · have hle := pow_le_of_lt_length _ _ (by omega) (digitCount_eq _ ▸ hk)
+      have hsplit := digitChars_split _ _ hle
+      have hlen : digitCount n.mantissa.natAbs - (-n.exponent).toNat =
+          (digitChars (n.mantissa.natAbs / 10 ^ (-n.exponent).toNat)).length := by
+        rw [digitCount_eq, hsplit, List.length_append, length_padDigits]; omega
+      simp only [hk, ite_true, toList_pushPadDigits, String.toList_push, toList_pushDigits,
+        pow10_eq, hsign, String.toList_append, String.toList_ofList, hlen]
+      rw [hsplit, List.take_left', List.drop_left'] <;> simp
+    · by_cases hz : (-n.exponent).toNat - digitCount n.mantissa.natAbs ≤ plainZeroLimit
+      · simp [hk, hz, toList_pushDigits, toList_pushn, hsign, zeros]
+      · simp [hk, hz, toList_pushDigits, toList_digitsTo, hsign, digitString]
+
+/--
+The compiled `number` writes onto an empty string through `numberTo`, so callers of `number`,
+`Number.toString` among them, get the fast writer too.
+
+`@number = @numberFast` equates the functions over every number, as `@[csimp]` requires.
+`numberFast n` is `numberTo "" n`, which `numberTo_eq` makes `"" ++ number n`.
+-/
+@[csimp] theorem number_eq_numberFast : @number = @numberFast := by
+  funext n
+  rw [numberFast, numberTo_eq, String.empty_append]
+
 /-! ## Strings -/
 
 /--
