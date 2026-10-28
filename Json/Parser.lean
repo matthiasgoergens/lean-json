@@ -378,6 +378,296 @@ where
   termination_by p.remainingBytes
   decreasing_by exact stringStep_char_lt p c q hs
 
+/-! ## Scanning a byte at a time -/
+
+/-!
+The unescaped characters of a string come in runs, and decoding each character of a run only to
+learn that the run goes on is wasted work. `scanWhile` finds where a run ends, and `scanBytes` finds
+the same place a byte at a time without decoding anything. That rests on how UTF-8 is built: a
+character of one byte is its own code point, below `0x80`, and every byte of a longer character is
+at least `0x80`. A byte test that agrees with the character test below `0x80`, and answers for every
+byte from `0x80` up what the character test answers for every character beyond ASCII, therefore
+stops at the same character boundary.
+-/
+
+/--
+What `step?` found, in the terms of the `String` library: the position is not the end, the
+character is the one there and the next position is the one after it. Lemmas about slices and
+bytes of a string are stated in those terms, so this is how a step of the scanner reaches them.
+
+`h : step? p = some (c, q)` says `step?` found `c` at `p` and moved to `q`. The conclusion
+supplies `hp : p ≠ s.endPos` together with `p.get hp = c` and `p.next hp = q`. `step?` answers
+`some` only in its branch that has such an `hp`, and there it returns exactly that pair.
+-/
+private theorem step?_eq_some {p q : s.Pos} {c : Char} (h : step? p = some (c, q)) :
+    ∃ hp : p ≠ s.endPos, p.get hp = c ∧ p.next hp = q := by
+  rw [step?] at h
+  split at h
+  · simp at h
+  · next hp =>
+    rw [Option.some.injEq, Prod.mk.injEq] at h
+    exact ⟨hp, h.1, h.2⟩
+
+/-- Where the run of characters satisfying `f` that starts at `p` ends. -/
+def scanWhile (f : Char → Bool) (p : s.Pos) : s.Pos :=
+  match _hc : step? p with
+  | some (c, q) => if f c then scanWhile f q else p
+  | none => p
+termination_by p.remainingBytes
+decreasing_by exact step?_lt _hc
+
+/--
+A run ends at or after where it starts. A slice of the text needs its start no later than its
+end, and a loop that skips a run needs the run's end to leave no more text than its start did;
+both come from this.
+
+`p ≤ scanWhile f p` compares positions in the text, so it says the end of the run of characters
+satisfying `f` from `p` lies at `p` or further on. The induction follows `scanWhile`: a run that
+stops at once ends at `p` itself, and one that continues ends where the run from the next
+character does, which is past `p` by `String.Pos.lt_next`.
+-/
+private theorem le_scanWhile (f : Char → Bool) (p : s.Pos) : p ≤ scanWhile f p := by
+  fun_induction scanWhile f p with
+  | case1 p c q hc hf ih =>
+    obtain ⟨hp, -, rfl⟩ := step?_eq_some hc
+    exact String.Pos.le_of_lt (String.Pos.lt_of_lt_of_le String.Pos.lt_next ih)
+  | case2 => exact String.Pos.le_refl _
+  | case3 => exact String.Pos.le_refl _
+
+/--
+Skipping a run never leaves more text than there was, which is the form the loops' termination
+arguments and the scanners' records take.
+
+`(scanWhile f p).remainingBytes ≤ p.remainingBytes` says the bytes left after the run are at most
+the bytes left at its start. It is `le_scanWhile` read through
+`String.Pos.le_iff_remainingBytes_le`, which turns the order on positions into the reverse order
+on what remains.
+-/
+theorem scanWhile_le (f : Char → Bool) (p : s.Pos) :
+    (scanWhile f p).remainingBytes ≤ p.remainingBytes :=
+  (String.Pos.le_iff_remainingBytes_le _ _).mp (le_scanWhile f p)
+
+/--
+A run that continues past its first character ends where the run from the next character ends.
+This is the unfolding of `scanWhile` that a loop taking one character at a time is compared with.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hf` says `c` satisfies
+`f`. The equation `scanWhile f p = scanWhile f q` holds because `scanWhile` takes its continuing
+branch at `p`, whose result is by definition the run from `q`.
+-/
+private theorem scanWhile_step {f : Char → Bool} {p q : s.Pos} {c : Char}
+    (hc : step? p = some (c, q)) (hf : f c = true) : scanWhile f p = scanWhile f q := by
+  rw [scanWhile]
+  split
+  · next c' q' hc' =>
+    rw [hc] at hc'
+    injection hc' with hc''
+    injection hc'' with h₁ h₂
+    subst h₁
+    subst h₂
+    rw [ite_eq_left hf]
+  · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
+
+/-- The byte offset at which a run of bytes satisfying `g`, having reached byte `i`, ends. -/
+@[specialize]
+def scanBytes (s : String) (g : UInt8 → Bool) (i : Nat) : Nat :=
+  if h : i < s.utf8ByteSize then
+    if g (s.getUTF8Byte ⟨i⟩ h) then scanBytes s g (i + 1) else i
+  else i
+termination_by s.utf8ByteSize - i
+
+/--
+The bytes of the text at a position are the UTF-8 encoding of the character there. This is what
+connects the byte scan, which looks at `s.toByteArray`, to `step?`, which decodes characters.
+
+`hp` says `p` is not the end, so `p.get hp` is a character, and `hk` picks one of its
+`utf8Size` bytes. The equation says the byte `k` places after `p` is byte `k` of
+`String.utf8EncodeChar (p.get hp)`. It is `String.Pos.utf8Encode_get_eq_extract`, which states
+the encoding of the character as a slice of the text's bytes, read at index `k`.
+-/
+private theorem byte_get {p : s.Pos} (hp : p ≠ s.endPos) {k : Nat}
+    (hk : k < (p.get hp).utf8Size) (h : p.offset.byteIdx + k < s.toByteArray.size) :
+    s.toByteArray[p.offset.byteIdx + k] =
+      (String.utf8EncodeChar (p.get hp))[k]'(by simpa using hk) := by
+  have e := p.utf8Encode_get_eq_extract hp
+  rw [← ByteArray.getElem_extract (stop := p.offset.byteIdx + (p.get hp).utf8Size)
+    (by rw [← e, List.utf8Encode_singleton]; simpa using hk)]
+  simp only [← e, List.utf8Encode_singleton, List.getElem_toByteArray]
+
+/--
+Every byte of a character UTF-8 spells with more than one byte is at least `0x80`, so no byte
+inside such a character can be mistaken for an ASCII character.
+
+`hc` says `c` takes more than one byte, and `k` indexes one of the bytes of
+`String.utf8EncodeChar c`. The conclusion is that byte is at least `0x80`. The library spells out
+the encoding for each length; every byte in it is some value ored with `0x80`, `0xC0`, `0xE0` or
+`0xF0`, each at least `0x80`, and oring cannot make a byte smaller.
+-/
+private theorem utf8EncodeChar_ge {c : Char} (hc : c.utf8Size ≠ 1) (k : Nat)
+    (hk : k < (String.utf8EncodeChar c).length) : 0x80 ≤ (String.utf8EncodeChar c)[k] := by
+  have h80 : ∀ m x : UInt8, 0x80 ≤ m → 0x80 ≤ x ||| m := fun m x hm =>
+    UInt8.le_trans hm (by rw [UInt8.le_iff_toNat_le, UInt8.toNat_or]; exact Nat.right_le_or)
+  have hk' : k < c.utf8Size := by simpa using hk
+  rcases c.utf8Size_eq with h | h | h | h
+  · exact absurd h hc
+  · simp only [String.utf8EncodeChar_eq_cons_cons h]
+    rcases k with _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+  · simp only [String.utf8EncodeChar_eq_cons_cons_cons h]
+    rcases k with _ | _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+  · simp only [String.utf8EncodeChar_eq_cons_cons_cons_cons h]
+    rcases k with _ | _ | _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+
+/--
+The byte scan passes over any stretch of bytes that all satisfy its test, so the proof can step
+over a whole character at once while the code takes a byte at a time.
+
+`n` bytes from offset `i` lie within the text by the first hypothesis, and the second says each
+of them satisfies `g`. The equation says the scan from `i` ends where the scan from `i + n` does.
+The induction is on `n`: each byte passed is one turn of `scanBytes`.
+-/
+private theorem scanBytes_skip (s : String) (g : UInt8 → Bool) :
+    ∀ (n i : Nat), i + n ≤ s.utf8ByteSize →
+      (∀ k (h : i + k < s.toByteArray.size), k < n → g s.toByteArray[i + k] = true) →
+      scanBytes s g i = scanBytes s g (i + n)
+  | 0, i, _, _ => rfl
+  | n + 1, i, hn, hb => by
+    have hi : i < s.utf8ByteSize := by omega
+    rw [scanBytes, dite_eq_left hi, ite_eq_left (by
+        rw [String.getUTF8Byte_eq_getElem]; simpa using hb 0 (by simpa using hi) (by omega)),
+      scanBytes_skip s g n (i + 1) (by omega) (fun k h hk => by
+        have := hb (k + 1) (by simp only [String.size_toByteArray]; omega) (by omega)
+        simpa only [show i + (k + 1) = i + 1 + k by omega] using this),
+      show i + 1 + n = i + (n + 1) by omega]
+
+/--
+The byte scan ends a run exactly where the character scan does, for any pair of tests related as
+UTF-8 allows. This is the one fact about UTF-8 the parser relies on beyond what the `String`
+library provides.
+
+`h₁` says that on a character of one byte, whose byte is `c.val.toUInt8`, the byte test `g`
+answers what the character test `f` answers; `h₂` says that on every byte from `0x80` up `g`
+answers what `f` answers on any character of more than one byte. The equation says
+`scanBytes s g`, started at the byte offset of `p`, ends at the byte offset of `scanWhile f p`.
+The induction follows `scanWhile`. A character that continues the run is passed over by
+`scanBytes_skip`, each of its bytes satisfying `g` by `h₁` if it is one byte and by `h₂` with
+`utf8EncodeChar_ge` otherwise. At a character that ends the run, its first byte fails `g` by the
+same two cases. At the end of the text both stop.
+-/
+private theorem scanBytes_eq (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) :
+    scanBytes s g p.offset.byteIdx = (scanWhile f p).offset.byteIdx := by
+  fun_induction scanWhile f p with
+  | case1 p c q hc hf ih =>
+    obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+    rw [← ih, String.Pos.byteIdx_offset_next]
+    apply scanBytes_skip s g
+    · have := String.Pos.offset_byteIdx_le_utf8ByteSize s (p.next hp)
+      rw [String.Pos.byteIdx_offset_next] at this
+      exact this
+    · intro k h hk
+      rw [byte_get hp hk h]
+      by_cases h1 : (p.get hp).utf8Size = 1
+      · obtain rfl : k = 0 := by omega
+        simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero]
+        rw [h₁ _ h1]
+        exact hf
+      · rw [h₂ _ h1 _ (utf8EncodeChar_ge h1 k _)]
+        exact hf
+  | case2 p c q hc hf =>
+    obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+    have hlt : p.offset.byteIdx < s.utf8ByteSize := by
+      have := String.Pos.offset_byteIdx_le_utf8ByteSize s (p.next hp)
+      rw [String.Pos.byteIdx_offset_next] at this
+      have := Char.utf8Size_pos (p.get hp)
+      omega
+    rw [scanBytes, dite_eq_left hlt, ite_eq_right]
+    have hb := byte_get hp (k := 0) (Char.utf8Size_pos _) (by simpa using hlt)
+    simp only [Nat.add_zero] at hb
+    rw [String.getUTF8Byte_eq_getElem, hb]
+    by_cases h1 : (p.get hp).utf8Size = 1
+    · simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero]
+      rw [h₁ _ h1]
+      simpa using hf
+    · rw [h₂ _ h1 _ (utf8EncodeChar_ge h1 0 _)]
+      simpa using hf
+  | case3 p hc =>
+    have hp : p = s.endPos := by
+      rw [step?] at hc
+      split at hc
+      · assumption
+      · simp at hc
+    subst hp
+    rw [scanBytes, dite_eq_right (by simp)]
+
+/--
+`scanWhile f`, computed by the byte scan `scanBytes s g`. The proof that the byte offset it
+reaches is a character boundary is `scanBytes_eq`, which is why `h₁` and `h₂` are arguments.
+-/
+@[inline]
+def scanBytesPos (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) : s.Pos :=
+  ⟨⟨scanBytes s g p.offset.byteIdx⟩, by
+    rw [scanBytes_eq g f h₁ h₂]; exact (scanWhile f p).isValid⟩
+
+/--
+The position the byte scan reaches is the end of the run. This is the form the `csimp` lemmas
+below need, an equation between positions rather than byte offsets.
+
+`scanBytesPos g f h₁ h₂ p` is the position at the byte offset `scanBytes` reaches, and
+`scanWhile f p` is the end of the run of characters satisfying `f`. Two positions are equal when
+their byte offsets are, and `scanBytes_eq` says these agree.
+-/
+private theorem scanBytesPos_eq (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) :
+    scanBytesPos g f h₁ h₂ p = scanWhile f p :=
+  String.Pos.ext (String.Pos.Raw.ext (scanBytes_eq g f h₁ h₂ p))
+
+/--
+A character of one byte has that byte's value as its code point. Each byte test below is checked
+against its character test through this.
+
+`hc` says `c` takes one byte, which `Char.utf8Size_eq_one_iff` turns into `c.val ≤ 127`. The
+equation says the byte `c.val.toUInt8`, read as a number, is `c.toNat`; truncating to eight bits
+loses nothing below `0x80`.
+-/
+private theorem toNat_toUInt8 {c : Char} (hc : c.utf8Size = 1) :
+    c.val.toUInt8.toNat = c.toNat ∧ c.toNat < 0x80 := by
+  have h127 : c.toNat ≤ 127 := by
+    simpa [UInt32.le_iff_toNat_le] using Char.utf8Size_eq_one_iff.mp hc
+  refine ⟨?_, by omega⟩
+  rw [UInt32.toNat_toUInt8]
+  exact Nat.mod_eq_of_lt (show c.toNat < 2 ^ 8 by omega)
+
+/--
+A character of more than one byte is beyond ASCII, which is what decides both character tests
+for it.
+
+`hc` says `c` does not take one byte, so by `Char.utf8Size_eq_one_iff` its code point is above
+`127`, and `0x80 ≤ c.toNat` says exactly that.
+-/
+private theorem toNat_ge_of_utf8Size {c : Char} (hc : c.utf8Size ≠ 1) : 0x80 ≤ c.toNat := by
+  have : ¬ c.val ≤ 127 := fun h => hc (Char.utf8Size_eq_one_iff.mpr h)
+  simp only [UInt32.le_iff_toNat_le, UInt32.reduceToNat] at this
+  show 0x80 ≤ c.val.toNat
+  omega
+
+/-! ## Strings a run at a time -/
+
 /-!
 `string` appends one character at a time, which in compiled code is an allocation and a push for
 each one. A run of unescaped characters stands for itself, so `stringFast` copies each run whole
@@ -418,83 +708,61 @@ theorem stringStep_unescaped {p q : s.Pos} {c : Char} (hs : step? p = some (c, q
     subst hww
     rw [ite_eq_left hu]
 
-/--
-What `step?` found, in the terms of the `String` library: the position is not the end, the
-character is the one there and the next position is the one after it. Lemmas about slices of a
-string are stated in those terms, so this is how a step of the scanner reaches them.
-
-`h : step? p = some (c, q)` says `step?` found `c` at `p` and moved to `q`. The conclusion
-supplies `hp : p ≠ s.endPos` together with `p.get hp = c` and `p.next hp = q`. `step?` answers
-`some` only in its branch that has such an `hp`, and there it returns exactly that pair.
--/
-private theorem step?_eq_some {p q : s.Pos} {c : Char} (h : step? p = some (c, q)) :
-    ∃ hp : p ≠ s.endPos, p.get hp = c ∧ p.next hp = q := by
-  rw [step?] at h
-  split at h
-  · simp at h
-  · next hp =>
-    rw [Option.some.injEq, Prod.mk.injEq] at h
-    exact ⟨hp, h.1, h.2⟩
-
 /-- Where the run of unescaped characters that starts at `p` ends. -/
-def unescapedEnd (p : s.Pos) : s.Pos :=
-  match _hc : step? p with
-  | some (c, q) => if Spec.isUnescaped c then unescapedEnd q else p
-  | none => p
-termination_by p.remainingBytes
-decreasing_by exact step?_lt _hc
+def unescapedEnd (p : s.Pos) : s.Pos := scanWhile Spec.isUnescaped p
+
+/-- A byte that cannot end a run of unescaped characters. -/
+@[inline]
+def continuesRun (b : UInt8) : Bool := 0x20 ≤ b && b != 0x22 && b != 0x5C
 
 /--
-A run ends at or after where it starts. A slice of the text needs its start no later than its
-end, and the string loop needs the run's end to leave no more text than its start did; both come
-from this.
+For a character of one byte, the byte test for continuing a run and the grammar's test for an
+unescaped character agree, which is the first condition `scanBytes_eq` asks of a byte test.
 
-`p ≤ unescapedEnd p` compares positions in the text, so it says the end of the run beginning at
-`p` lies at `p` or further on. The induction follows `unescapedEnd`: a run that stops at once
-ends at `p` itself, and one that continues ends where the run from the next character does, which
-is past `p` by `String.Pos.lt_next`.
+`hc` says `c` takes one byte, so `c.val.toUInt8` is that byte and has the value `c.toNat`, below
+`0x80`. `continuesRun` asks for at least `0x20` and neither `0x22` nor `0x5C`;
+`Spec.isUnescaped c` asks for `0x20` to `0x21`, `0x23` to `0x5B`, or at least `0x5D`. Below
+`0x80` those are the same numbers.
 -/
-private theorem le_unescapedEnd (p : s.Pos) : p ≤ unescapedEnd p := by
-  fun_induction unescapedEnd p with
-  | case1 p c q hc hu ih =>
-    obtain ⟨hp, -, rfl⟩ := step?_eq_some hc
-    exact String.Pos.le_of_lt (String.Pos.lt_of_lt_of_le String.Pos.lt_next ih)
-  | case2 => exact String.Pos.le_refl _
-  | case3 => exact String.Pos.le_refl _
+theorem continuesRun_ascii (c : Char) (hc : c.utf8Size = 1) :
+    continuesRun c.val.toUInt8 = Spec.isUnescaped c := by
+  have hn : c.toUInt8.toNat = c.toNat := (toNat_toUInt8 hc).1
+  rw [Bool.eq_iff_iff]
+  simp [continuesRun, Spec.isUnescaped, UInt8.le_iff_toNat_le, ← UInt8.toNat_inj, hn]
+  omega
 
 /--
-Skipping a run never leaves more text than there was, which is the form the string loop's
-termination argument takes.
+Every byte from `0x80` up continues a run, and every character beyond ASCII is unescaped, which
+is the second condition `scanBytes_eq` asks of a byte test.
 
-`(unescapedEnd p).remainingBytes ≤ p.remainingBytes` says the bytes left after the run are at
-most the bytes left at its start. It is `le_unescapedEnd` read through
-`String.Pos.le_iff_remainingBytes_le`, which turns an order on positions into the reverse order
-on what remains.
+`hc` says `c` takes more than one byte, so its code point is at least `0x80` and above `0x5D`, and
+`hb` says the byte `b` is at least `0x80`, so neither below `0x20` nor `0x22` nor `0x5C`. Both
+tests answer `true`.
 -/
-private theorem unescapedEnd_le (p : s.Pos) :
-    (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
-  (String.Pos.le_iff_remainingBytes_le _ _).mp (le_unescapedEnd p)
+theorem continuesRun_high (c : Char) (hc : c.utf8Size ≠ 1) (b : UInt8) (hb : 0x80 ≤ b) :
+    continuesRun b = Spec.isUnescaped c := by
+  have hn := toNat_ge_of_utf8Size hc
+  simp only [UInt8.le_iff_toNat_le, UInt8.reduceToNat] at hb
+  rw [Bool.eq_iff_iff]
+  simp [continuesRun, Spec.isUnescaped, UInt8.le_iff_toNat_le, ← UInt8.toNat_inj]
+  omega
+
+def unescapedEndFast (p : s.Pos) : s.Pos :=
+  scanBytesPos continuesRun Spec.isUnescaped continuesRun_ascii continuesRun_high p
 
 /--
-A run that continues past its first character ends where the run from the next character ends.
-This is the unfolding of `unescapedEnd` the string loop's correspondence steps through.
+The compiler is told to find the end of a run of unescaped characters a byte at a time.
+`stringFast` is written with `unescapedEnd`, and so is every proof about it; this makes what runs
+the byte scan.
 
-`hc` says `c` is the character at `p` and `q` the position after it, and `hu` says `c` is
-unescaped. The equation `unescapedEnd p = unescapedEnd q` then holds because `unescapedEnd` takes
-its continuing branch at `p`, whose result is by definition the run from `q`.
+The equation `@unescapedEnd = @unescapedEndFast` is between the functions, over every text and
+position, as `@[csimp]` requires. `unescapedEndFast` is `scanBytesPos` with the tests for
+unescaped characters, which `scanBytesPos_eq` equates with `scanWhile Spec.isUnescaped`, the
+definition of `unescapedEnd`.
 -/
-private theorem unescapedEnd_unescaped {p q : s.Pos} {c : Char} (hc : step? p = some (c, q))
-    (hu : Spec.isUnescaped c = true) : unescapedEnd p = unescapedEnd q := by
-  rw [unescapedEnd]
-  split
-  · next c' q' hc' =>
-    rw [hc] at hc'
-    injection hc' with hc''
-    injection hc'' with h₁ h₂
-    subst h₁
-    subst h₂
-    rw [ite_eq_left hu]
-  · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
+@[csimp] theorem unescapedEnd_eq_unescapedEndFast : @unescapedEnd = @unescapedEndFast := by
+  funext s p
+  exact (scanBytesPos_eq _ _ _ _ p).symm
 
 /-- `acc` followed by the text from `p` to `q`, which is that text itself when `acc` is empty. -/
 def appendRun (acc : String) (p q : s.Pos) : String :=
@@ -580,22 +848,23 @@ The string loop passes over a run of unescaped characters as one copy of the run
 whole difference between `string` and `stringFast`, which otherwise take the same steps.
 
 `string.go start p acc h` is the loop at `p` holding `acc`. The equation says it equals the loop
-at `unescapedEnd p`, the end of the run, holding `acc` followed by the run's text
-`s.extract p (unescapedEnd p)`; `h'` is that call's bound. The induction follows `unescapedEnd`:
-where the run stops at once the text is empty, and where it continues `string_go_unescaped`
-takes one character and `push_append_extract` moves it into the copy.
+at `scanWhile Spec.isUnescaped p`, the end of the run, holding `acc` followed by the run's text;
+`h'` is that call's bound. The induction follows `scanWhile`: where the run stops at once the
+text is empty, and where it continues `string_go_unescaped` takes one character and
+`push_append_extract` moves it into the copy.
 -/
 private theorem string_go_run (start p : s.Pos) :
     ∀ (acc : String) (h : p.remainingBytes ≤ start.remainingBytes)
-      (h' : (unescapedEnd p).remainingBytes ≤ start.remainingBytes),
+      (h' : (scanWhile Spec.isUnescaped p).remainingBytes ≤ start.remainingBytes),
       string.go start p acc h =
-        string.go start (unescapedEnd p) (acc ++ s.extract p (unescapedEnd p)) h' := by
-  fun_induction unescapedEnd p with
+        string.go start (scanWhile Spec.isUnescaped p)
+          (acc ++ s.extract p (scanWhile Spec.isUnescaped p)) h' := by
+  fun_induction scanWhile Spec.isUnescaped p with
   | case1 p c q hc hu ih =>
     intro acc h h'
     have hq : q.remainingBytes ≤ start.remainingBytes := by have := step?_lt hc; omega
     rw [string_go_unescaped hc hu acc h hq, ih (acc.push c) hq h']
-    exact string_go_congr rfl (push_append_extract hc (le_unescapedEnd q) acc) _ _
+    exact string_go_congr rfl (push_append_extract hc (le_scanWhile _ q) acc) _ _
   | case2 | case3 =>
     intro acc h h'
     rw [String.extract_eq_copy_slice _ _ (String.Pos.le_refl _), String.copy_slice_self,
@@ -610,12 +879,19 @@ where
     | .fail e => .error e
     | .done q =>
       .ok ⟨appendRun acc p (unescapedEnd p), q, by
-        have := stringStep_done_lt _ q hs; have := unescapedEnd_le p; omega⟩
+        have := stringStep_done_lt _ q hs; have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
+          scanWhile_le _ p
+        omega⟩
     | .char c q =>
       go q ((appendRun acc p (unescapedEnd p)).push c) (by
-        have := stringStep_char_lt _ c q hs; have := unescapedEnd_le p; omega)
+        have := stringStep_char_lt _ c q hs; have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
+          scanWhile_le _ p
+        omega)
   termination_by p.remainingBytes
-  decreasing_by have := stringStep_char_lt _ c q hs; have := unescapedEnd_le p; omega
+  decreasing_by
+    have := stringStep_char_lt _ c q hs
+    have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+    omega
 
 /--
 The run-copying loop and the character loop agree at every position and accumulator, which is
@@ -630,35 +906,39 @@ identifies their accumulators.
 private theorem stringFast_go_eq (start p : s.Pos) (acc : String)
     (h : p.remainingBytes ≤ start.remainingBytes) :
     stringFast.go start p acc h = string.go start p acc h := by
+  have hrun := fun p acc (h : p.remainingBytes ≤ start.remainingBytes) =>
+    string_go_run start p acc h (Nat.le_trans (scanWhile_le _ p) h)
   fun_induction stringFast.go start p acc h with
   | case1 p acc h err hs =>
-    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    rw [hrun, string.go]
     split
-    · next e hs' => rw [hs] at hs'; injection hs' with hh; subst hh; rfl
-    · next r hs' => rw [hs] at hs'; simp at hs'
-    · next c r hs' => rw [hs] at hs'; simp at hs'
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; injection hs' with hh; subst hh; rfl
+    · next r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
   | case2 p acc h q hs =>
-    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    rw [hrun, string.go]
     split
-    · next e hs' => rw [hs] at hs'; simp at hs'
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
     · next r hs' =>
+      rw [unescapedEnd] at hs
       rw [hs] at hs'
       injection hs' with hh
       subst hh
-      simp only [appendRun_eq]
-    · next c r hs' => rw [hs] at hs'; simp at hs'
+      simp only [appendRun_eq, unescapedEnd]
+    · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
   | case3 p acc h c q hs ih =>
-    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    rw [hrun, string.go]
     split
-    · next e hs' => rw [hs] at hs'; simp at hs'
-    · next r hs' => rw [hs] at hs'; simp at hs'
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
     · next c' r hs' =>
+      rw [unescapedEnd] at hs
       rw [hs] at hs'
       injection hs' with h₁ h₂
       subst h₁
       subst h₂
       rw [ih]
-      exact string_go_congr rfl (by rw [appendRun_eq]) _ _
+      exact string_go_congr rfl (by rw [appendRun_eq, unescapedEnd]) _ _
 
 /--
 The compiler is told to read strings a run at a time in place of a character at a time.
