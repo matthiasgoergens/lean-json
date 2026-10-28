@@ -188,6 +188,102 @@ def expect? (p : s.Pos) : List Char → Option (Consumed Unit p)
       else none
     | none => none
 
+/--
+Where the text at `p` ends, if it begins with the characters of `l`. Unlike `expect?` it builds
+no record on the way back, so it runs as a loop.
+-/
+def expectEnd (p : s.Pos) : List Char → Option s.Pos
+  | [] => some p
+  | c :: rest =>
+    match step? p with
+    | some (c', q) => if c == c' then expectEnd q rest else none
+    | none => none
+
+/--
+Matching a literal never moves backwards, which is the bound the record `expectFast?` builds has
+to carry.
+
+`h : expectEnd p l = some q` says the text at `p` begins with `l` and `q` is where it ends. The
+conclusion `q.remainingBytes ≤ p.remainingBytes` says no more text remains after the literal than
+before it. The induction is on `l`: the empty literal ends at `p`, and each character matched is
+one `step?`, which `step?_lt` says consumes text.
+-/
+theorem expectEnd_le : ∀ (l : List Char) (p q : s.Pos), expectEnd p l = some q →
+    q.remainingBytes ≤ p.remainingBytes
+  | [], p, q, h => by
+    rw [expectEnd, Option.some.injEq] at h
+    subst h
+    exact Nat.le_refl _
+  | c :: rest, p, q, h => by
+    rw [expectEnd] at h
+    split at h
+    · next c' r hc =>
+      split at h
+      · have := expectEnd_le rest r q h
+        have := step?_lt hc
+        omega
+      · simp at h
+    · simp at h
+
+/--
+`expect?` and `expectEnd` find the same end, or both find none. This is the whole content of
+`expect?`, whose record holds nothing but that position and a proof.
+
+`(expect? p l).map Consumed.pos` is where `expect?` says the literal `l` at `p` ends, if it
+matches, and `expectEnd p l` is the same question answered by the loop. The induction is on `l`,
+following the two definitions' identical case analysis of `step?` and of the comparison.
+-/
+private theorem expect?_pos : ∀ (l : List Char) (p : s.Pos),
+    (expect? p l).map Consumed.pos = expectEnd p l
+  | [], p => rfl
+  | c :: rest, p => by
+    rw [expect?, expectEnd]
+    split
+    · next c' q hc =>
+      simp only [hc]
+      split
+      · rw [← expect?_pos rest q]
+        cases expect? q rest <;> rfl
+      · rfl
+    · next hc => simp only [hc]; rfl
+
+/-- `expect?`, with the record built where it is used rather than on every character. -/
+@[inline]
+def expectFast? (p : s.Pos) (l : List Char) : Option (Consumed Unit p) :=
+  match h : expectEnd p l with
+  | some q => some ⟨(), q, expectEnd_le l p q h⟩
+  | none => none
+
+/--
+The compiler is told to match literals with the loop. Every proof speaks of `expect?`, and what
+runs is `expectFast?`, which builds its record once rather than again for every character on the
+way back out of a recursion.
+
+The equation `@expect? = @expectFast?` is between the functions, over every text, position and
+literal, as `@[csimp]` requires. A record `Consumed Unit p` is determined by its position, so the
+two agree wherever their positions do, which is `expect?_pos`.
+-/
+@[csimp] theorem expect?_eq_expectFast? : @expect? = @expectFast? := by
+  funext s p l
+  have hpos := expect?_pos l p
+  unfold expectFast?
+  split
+  · next q h =>
+    rw [h] at hpos
+    cases he : expect? p l with
+    | none => rw [he] at hpos; simp at hpos
+    | some r =>
+      rw [he] at hpos
+      obtain ⟨⟨⟩, w, hw⟩ := r
+      simp only [Option.map_some, Option.some.injEq] at hpos
+      subst hpos
+      rfl
+  · next h =>
+    rw [h] at hpos
+    cases he : expect? p l with
+    | none => rfl
+    | some r => rw [he] at hpos; simp at hpos
+
 /-- One hexadecimal digit, as a number. -/
 def hexDigit? (p : s.Pos) : Option (Scanned Nat p) :=
   match hc : step? p with
