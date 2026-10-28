@@ -712,7 +712,8 @@ def escapeRunTo (s acc : String) (start p : s.Pos) : String :=
     if start = s.startPos then acc ++ s else acc ++ s.extract start p
   else
     let c := p.get h
-    if needsEscape c then escapeRunTo s (escapeCharTo (acc ++ s.extract start p) c) (p.next h) (p.next h)
+    if needsEscape c then
+      escapeRunTo s (escapeCharTo (acc ++ s.extract start p) c) (p.next h) (p.next h)
     else escapeRunTo s acc start (p.next h)
 termination_by p
 decreasing_by all_goals exact String.Pos.lt_next
@@ -905,6 +906,383 @@ def render (st : Style) : List Item → String → String
       (stringTo (acc ++ st.precedes d first) k ++ st.colon)
 termination_by items _ => weight items
 decreasing_by all_goals simp only [weight, Item.weight, size, sizeList, sizeFields] <;> omega
+
+/-!
+`render` builds each separator, break and closing bracket as a string of its own, appends each
+number as a fresh string, and allocates a cell for every element and member it visits, once when an
+array becomes a list and again on its stack. What runs for a single value writes all of its text
+straight onto the accumulator and keeps one frame per open container, holding the container's
+array and the index of the next entry, so an entry that is not a container costs an index step and
+nothing on the heap.
+-/
+
+def Style.lineBreakTo (st : Style) (acc : String) (depth : Nat) : String :=
+  match st.indent with
+  | none => acc
+  | some k => (acc.push '\n').pushn ' ' (k * depth)
+
+def Style.precedesTo (st : Style) (acc : String) (depth : Nat) (first : Bool) : String :=
+  if first then acc else st.lineBreakTo (acc.push ',') depth
+
+def Style.colonTo (st : Style) (acc : String) : String :=
+  match st.indent with
+  | none => acc.push ':'
+  | some _ => (acc.push ':').push ' '
+
+def isScalar : Json → Bool
+  | .arr _ | .obj _ => false
+  | _ => true
+
+/-- `acc` followed by `j`, for a `j` that `isScalar` accepts; a container is not written. -/
+def scalarTo (acc : String) : Json → String
+  | .null => acc ++ "null"
+  | .bool true => acc ++ "true"
+  | .bool false => acc ++ "false"
+  | .num n => numberTo acc n
+  | .str s => stringTo acc s
+  | .arr _ | .obj _ => acc
+
+/--
+Writing a line break onto the accumulated text is appending the break `render` builds. The
+compact form writes nothing, and the pretty form a newline and the indentation.
+
+`st.lineBreakTo acc depth` is what the frame-based traversal produces and
+`acc ++ st.lineBreak depth` what `render` produces; the proof takes the two layouts in turn.
+-/
+private theorem lineBreakTo_eq (st : Style) (acc : String) (depth : Nat) :
+    st.lineBreakTo acc depth = acc ++ st.lineBreak depth := by
+  rw [Style.lineBreakTo, Style.lineBreak]
+  split
+  · simp
+  · rw [← String.toList_inj]; simp [toList_pushn, spaces]
+
+/--
+Writing a break and then a closing bracket onto the accumulated text is appending the closing text
+`render` builds, the break followed by the bracket, without building that text as a string.
+
+`(st.lineBreakTo acc depth).push c` is what the frame-based traversal produces and
+`acc ++ (st.lineBreak depth ++ String.singleton c)` what `render` produces, in either layout.
+-/
+private theorem lineBreakTo_push (st : Style) (acc : String) (depth : Nat) (c : Char) :
+    (st.lineBreakTo acc depth).push c = acc ++ (st.lineBreak depth ++ String.singleton c) := by
+  rw [lineBreakTo_eq, ← String.toList_inj]; simp
+
+/--
+Writing the separator in front of an element or member is appending the one `render` builds:
+nothing before the first, and a comma and a break before the others.
+
+`st.precedesTo acc depth first` is the frame-based traversal's text and
+`acc ++ st.precedes depth first` `render`'s, for either value of `first`.
+-/
+private theorem precedesTo_eq (st : Style) (acc : String) (depth : Nat) (first : Bool) :
+    st.precedesTo acc depth first = acc ++ st.precedes depth first := by
+  rw [Style.precedesTo, Style.precedes]
+  split
+  · simp
+  · rw [lineBreakTo_eq, ← String.toList_inj]; simp
+
+/--
+Writing the colon after a member's name is appending the one `render` builds, with a space after
+it in the pretty form.
+
+`st.colonTo acc` is the frame-based traversal's text and `acc ++ st.colon` `render`'s, in both
+layouts.
+-/
+private theorem colonTo_eq (st : Style) (acc : String) : st.colonTo acc = acc ++ st.colon := by
+  rw [Style.colonTo, Style.colon]
+  split <;> (rw [← String.toList_inj]; simp)
+
+/--
+A value that is not a container takes `render` one step, which appends its text. This is what
+lets the frame-based traversal write such an element or member at once, with no frame of its own.
+
+`h : isScalar j = true` excludes arrays and objects, the values whose step pushes more work instead
+of writing text. The equation says rendering `j` and then `rest` is rendering `rest` after
+`scalarTo` has written `j`, whatever the depth `d`.
+-/
+private theorem render_scalar (st : Style) (d : Nat) (j : Json) (rest : List Item) (acc : String)
+    (h : isScalar j = true) :
+    render st (.val d j :: rest) acc = render st rest (scalarTo acc j) := by
+  match j, h with
+  | .null, _ => rw [render, scalarTo]
+  | .bool true, _ => rw [render, scalarTo]
+  | .bool false, _ => rw [render, scalarTo]
+  | .num n, _ => rw [render, scalarTo, numberTo_eq]
+  | .str s, _ => rw [render, scalarTo]
+
+/-- A container being written: its depth, its elements or members, and the index of the next. -/
+inductive Frame where
+  | arr (depth : Nat) (elems : Array Json) (i : Nat)
+  | obj (depth : Nat) (fields : Array (String × Json)) (i : Nat)
+
+/-- The pending items that a stack of frames stands for. -/
+def Frame.items (st : Style) : List Frame → List Item
+  | [] => []
+  | .arr d a i :: rest =>
+    .elems (d + 1) (a.toList.drop i) (i == 0) :: .lit (st.lineBreak d ++ "]") :: Frame.items st rest
+  | .obj d f i :: rest =>
+    .members (d + 1) (f.toList.drop i) (i == 0) :: .lit (st.lineBreak d ++ "}") ::
+      Frame.items st rest
+
+/--
+An index inside an array marks where its list of entries continues: the entry at that index, then
+those after it. The frame-based traversal steps an index where `render` takes a list apart, and
+this is what lets the two be compared.
+
+`h : i < a.size` says the index is in range, which is what makes `a[i]` exist; the equation splits
+the entries from `i` on into `a[i]` and the entries from `i + 1` on.
+-/
+private theorem drop_toList_cons {α : Type} (a : Array α) (i : Nat) (h : i < a.size) :
+    a.toList.drop i = a[i] :: a.toList.drop (i + 1) := by
+  rw [List.drop_eq_getElem_cons (by simpa using h)]
+  simp
+
+/--
+The measure of a list of members counts each member's value and its separator, whatever the
+member's name. The traversal's termination is argued over members given as pairs, not taken apart
+into a name and a value.
+
+`sizeFields (p :: l)` is the measure of the members `p` followed by `l`, and the equation gives it
+as `p`'s value's measure, one for the separator, and the rest.
+-/
+private theorem sizeFields_cons (p : String × Json) (l : List (String × Json)) :
+    sizeFields (p :: l) = size p.2 + 1 + sizeFields l := by
+  cases p; rfl
+
+def renderFrames (st : Style) : List Frame → String → String
+  | [], acc => acc
+  | .arr d a i :: rest, acc =>
+    if h : i < a.size then
+      let acc := st.precedesTo acc (d + 1) (i == 0)
+      match hj : a[i] with
+      | .arr b =>
+        if b.isEmpty then
+          renderFrames st (.arr d a (i + 1) :: rest) (acc ++ "[]")
+        else
+          renderFrames st (.arr (d + 1) b 0 :: .arr d a (i + 1) :: rest)
+            (st.lineBreakTo (acc.push '[') (d + 2))
+      | .obj g =>
+        if g.isEmpty then
+          renderFrames st (.arr d a (i + 1) :: rest) (acc ++ "{}")
+        else
+          renderFrames st (.obj (d + 1) g 0 :: .arr d a (i + 1) :: rest)
+            (st.lineBreakTo (acc.push '{') (d + 2))
+      | j => renderFrames st (.arr d a (i + 1) :: rest) (scalarTo acc j)
+    else
+      renderFrames st rest ((st.lineBreakTo acc d).push ']')
+  | .obj d f i :: rest, acc =>
+    if h : i < f.size then
+      let acc := st.colonTo (stringTo (st.precedesTo acc (d + 1) (i == 0)) f[i].1)
+      match hv : f[i].2 with
+      | .arr b =>
+        if b.isEmpty then
+          renderFrames st (.obj d f (i + 1) :: rest) (acc ++ "[]")
+        else
+          renderFrames st (.arr (d + 1) b 0 :: .obj d f (i + 1) :: rest)
+            (st.lineBreakTo (acc.push '[') (d + 2))
+      | .obj g =>
+        if g.isEmpty then
+          renderFrames st (.obj d f (i + 1) :: rest) (acc ++ "{}")
+        else
+          renderFrames st (.obj (d + 1) g 0 :: .obj d f (i + 1) :: rest)
+            (st.lineBreakTo (acc.push '{') (d + 2))
+      | v => renderFrames st (.obj d f (i + 1) :: rest) (scalarTo acc v)
+    else
+      renderFrames st rest ((st.lineBreakTo acc d).push '}')
+termination_by frames _ => weight (Frame.items st frames)
+decreasing_by
+  all_goals
+    simp only [Frame.items, weight, Item.weight, List.drop_zero]
+    first
+    | omega
+    | (rw [drop_toList_cons _ _ h]; simp only [sizeList]; omega)
+    | (rw [drop_toList_cons _ _ h]; simp only [sizeList, hj, size]; omega)
+    | (rw [drop_toList_cons _ _ h]; simp only [sizeFields_cons]; omega)
+    | (rw [drop_toList_cons _ _ h]; simp only [sizeFields_cons, hv, size]; omega)
+
+/-- `render`, through frames when the stack holds a single container. -/
+def renderTop (st : Style) (items : List Item) (acc : String) : String :=
+  match items with
+  | [.val d (.arr a)] =>
+    if a.isEmpty then acc ++ "[]"
+    else renderFrames st [.arr d a 0] (st.lineBreakTo (acc.push '[') (d + 1))
+  | [.val d (.obj f)] =>
+    if f.isEmpty then acc ++ "{}"
+    else renderFrames st [.obj d f 0] (st.lineBreakTo (acc.push '{') (d + 1))
+  | items => render st items acc
+
+/--
+A value that is neither an array nor an object is one `isScalar` accepts. The frame-based
+traversal tells containers apart by matching on them, and this turns the cases it falls through
+to into the condition `render_scalar` asks for.
+
+`h₁` and `h₂` say `j` is not an array and not an object; the conclusion is `isScalar j = true`,
+checked constructor by constructor.
+-/
+private theorem isScalar_of_ne {j : Json} (h₁ : ∀ b, j = .arr b → False)
+    (h₂ : ∀ g, j = .obj g → False) : isScalar j = true := by
+  cases j with
+  | arr b => exact (h₁ b rfl).elim
+  | obj g => exact (h₂ g rfl).elim
+  | _ => rfl
+
+/--
+`render` takes the entry at an index off the elements that remain from it, so a frame's next step
+and `render`'s next step agree on which element comes next.
+
+`h : i < a.size` says there is an element at `i`. The equation unfolds one step of `render` on the
+elements from `i` on, which writes the separator and leaves the element at `i` to render, followed
+by the elements from `i + 1`, none of them first.
+-/
+private theorem render_elems_drop (st : Style) (d : Nat) (a : Array Json) (i : Nat)
+    (h : i < a.size) (first : Bool) (rest : List Item) (acc : String) :
+    render st (.elems d (a.toList.drop i) first :: rest) acc =
+      render st (.val d a[i] :: .elems d (a.toList.drop (i + 1)) false :: rest)
+        (acc ++ st.precedes d first) := by
+  rw [drop_toList_cons _ _ h, render]
+
+/--
+`render` takes the member at an index off the members that remain from it, writing its name and
+colon, so a frame's next step and `render`'s next step agree on which member comes next.
+
+`h : i < f.size` says there is a member at `i`. The equation unfolds one step of `render` on the
+members from `i` on: the separator, the name `f[i].1` as a string literal and the colon are
+written, and the value `f[i].2` is left to render, followed by the members from `i + 1`.
+-/
+private theorem render_members_drop (st : Style) (d : Nat) (f : Array (String × Json)) (i : Nat)
+    (h : i < f.size) (first : Bool) (rest : List Item) (acc : String) :
+    render st (.members d (f.toList.drop i) first :: rest) acc =
+      render st (.val d f[i].2 :: .members d (f.toList.drop (i + 1)) false :: rest)
+        (stringTo (acc ++ st.precedes d first) f[i].1 ++ st.colon) := by
+  rw [drop_toList_cons _ _ h]
+  generalize f[i] = p
+  obtain ⟨k, v⟩ := p
+  rw [render]
+
+/--
+An array whose elements have all been written closes with its bracket, which is what `render`
+does when the elements from the frame's index on are none.
+
+`h : l.length ≤ i` says the index has reached the end of the elements `l`. The equation says
+`render` then writes `close` and carries on with `rest`.
+-/
+private theorem render_elems_done (st : Style) (d i : Nat) (l : List Json) (h : l.length ≤ i)
+    (first : Bool) (close : String) (rest : List Item) (acc : String) :
+    render st (.elems d (l.drop i) first :: .lit close :: rest) acc =
+      render st rest (acc ++ close) := by
+  rw [List.drop_eq_nil_of_le h, render, render]
+
+/--
+An object whose members have all been written closes with its bracket, which is what `render`
+does when the members from the frame's index on are none.
+
+`h : l.length ≤ i` says the index has reached the end of the members `l`. The equation says
+`render` then writes `close` and carries on with `rest`.
+-/
+private theorem render_members_done (st : Style) (d i : Nat) (l : List (String × Json))
+    (h : l.length ≤ i) (first : Bool) (close : String) (rest : List Item) (acc : String) :
+    render st (.members d (l.drop i) first :: .lit close :: rest) acc =
+      render st rest (acc ++ close) := by
+  rw [List.drop_eq_nil_of_le h, render, render]
+
+/--
+The frame-based traversal writes exactly what `render` writes from the items the frames stand for.
+Stating it for every stack of frames and every accumulator is what makes it an induction
+hypothesis.
+
+`renderFrames st frames acc` is the frame-based traversal and
+`render st (Frame.items st frames) acc` is `render` on the corresponding items: each frame stands
+for its remaining entries, from its index on, followed by its closing bracket. The induction
+follows `renderFrames`, matching each of its steps with the steps `render` takes on the same entry.
+-/
+private theorem renderFrames_eq (st : Style) (frames : List Frame) (acc : String) :
+    renderFrames st frames acc = render st (Frame.items st frames) acc := by
+  have hsucc : ∀ i : Nat, (i + 1 == 0) = false := fun i => by simp
+  fun_induction renderFrames st frames acc with
+  | case1 => rw [Frame.items, render]
+  | case2 d a i rest acc₀ h acc b hj hb ih =>
+    rw [ih, Frame.items, Frame.items, render_elems_drop st _ a i h, hj]
+    conv => rhs; rw [render, ite_eq_left hb]
+    simp only [acc, precedesTo_eq, hsucc]
+  | case3 d a i rest acc₀ h acc b hj hb ih =>
+    rw [ih, Frame.items, Frame.items, Frame.items, render_elems_drop st _ a i h, hj]
+    conv => rhs; rw [render, ite_eq_right hb]
+    rw [lineBreakTo_eq, ← String.append_singleton]
+    simp only [acc, precedesTo_eq, hsucc, List.drop_zero]
+    rfl
+  | case4 d a i rest acc₀ h acc g hj hg ih =>
+    rw [ih, Frame.items, Frame.items, render_elems_drop st _ a i h, hj]
+    conv => rhs; rw [render, ite_eq_left hg]
+    simp only [acc, precedesTo_eq, hsucc]
+  | case5 d a i rest acc₀ h acc g hj hg ih =>
+    rw [ih, Frame.items, Frame.items, Frame.items, render_elems_drop st _ a i h, hj]
+    conv => rhs; rw [render, ite_eq_right hg]
+    rw [lineBreakTo_eq, ← String.append_singleton]
+    simp only [acc, precedesTo_eq, hsucc, List.drop_zero]
+    rfl
+  | case6 d a i rest acc₀ h acc h₁ h₂ ih =>
+    rw [ih, Frame.items, Frame.items, render_elems_drop st _ a i h,
+      render_scalar _ _ _ _ _ (isScalar_of_ne h₁ h₂)]
+    simp only [acc, precedesTo_eq, hsucc]
+  | case7 d a i rest acc h ih =>
+    rw [ih, Frame.items, render_elems_done st _ i _ (by simpa using h), lineBreakTo_push]
+    rfl
+  | case8 d f i rest acc₀ h acc b hv hb ih =>
+    rw [ih, Frame.items, Frame.items, render_members_drop st _ f i h, hv]
+    conv => rhs; rw [render, ite_eq_left hb]
+    simp only [acc, precedesTo_eq, colonTo_eq, hsucc]
+  | case9 d f i rest acc₀ h acc b hv hb ih =>
+    rw [ih, Frame.items, Frame.items, Frame.items, render_members_drop st _ f i h, hv]
+    conv => rhs; rw [render, ite_eq_right hb]
+    rw [lineBreakTo_eq, ← String.append_singleton]
+    simp only [acc, precedesTo_eq, colonTo_eq, hsucc, List.drop_zero]
+    rfl
+  | case10 d f i rest acc₀ h acc g hv hg ih =>
+    rw [ih, Frame.items, Frame.items, render_members_drop st _ f i h, hv]
+    conv => rhs; rw [render, ite_eq_left hg]
+    simp only [acc, precedesTo_eq, colonTo_eq, hsucc]
+  | case11 d f i rest acc₀ h acc g hv hg ih =>
+    rw [ih, Frame.items, Frame.items, Frame.items, render_members_drop st _ f i h, hv]
+    conv => rhs; rw [render, ite_eq_right hg]
+    rw [lineBreakTo_eq, ← String.append_singleton]
+    simp only [acc, precedesTo_eq, colonTo_eq, hsucc, List.drop_zero]
+    rfl
+  | case12 d f i rest acc₀ h acc h₁ h₂ ih =>
+    rw [ih, Frame.items, Frame.items, render_members_drop st _ f i h,
+      render_scalar _ _ _ _ _ (isScalar_of_ne h₁ h₂)]
+    simp only [acc, precedesTo_eq, colonTo_eq, hsucc]
+  | case13 d f i rest acc h ih =>
+    rw [ih, Frame.items, render_members_done st _ i _ (by simpa using h), lineBreakTo_push]
+    rfl
+
+/--
+Compiled code renders through `renderTop`. Every claim tying the printer to the grammar is about
+`render`, and this makes the two one program, for `compress` and `pretty` alike.
+
+`@render = @renderTop` equates the functions over every layout, stack and accumulator, as
+`@[csimp]` requires. A single container goes through `renderFrames` and `renderFrames_eq`; any
+other stack is left to `render` itself, which `renderTop` was compiled against before this lemma
+existed.
+-/
+@[csimp] theorem render_eq_renderTop : @render = @renderTop := by
+  funext st items acc
+  unfold renderTop
+  split
+  · next d a =>
+    split
+    · next h => rw [render, ite_eq_left h, render]
+    · next h =>
+      rw [renderFrames_eq, Frame.items, Frame.items, render, ite_eq_right h, lineBreakTo_eq,
+        ← String.append_singleton]
+      rfl
+  · next d f =>
+    split
+    · next h => rw [render, ite_eq_left h, render]
+    · next h =>
+      rw [renderFrames_eq, Frame.items, Frame.items, render, ite_eq_right h, lineBreakTo_eq,
+        ← String.append_singleton]
+      rfl
+  · rfl
 
 end
 
