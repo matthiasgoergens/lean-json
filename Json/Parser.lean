@@ -381,13 +381,13 @@ where
 /-! ## Scanning a byte at a time -/
 
 /-!
-The unescaped characters of a string come in runs, and decoding each character of a run only to
-learn that the run goes on is wasted work. `scanWhile` finds where a run ends, and `scanBytes` finds
-the same place a byte at a time without decoding anything. That rests on how UTF-8 is built: a
-character of one byte is its own code point, below `0x80`, and every byte of a longer character is
-at least `0x80`. A byte test that agrees with the character test below `0x80`, and answers for every
-byte from `0x80` up what the character test answers for every character beyond ASCII, therefore
-stops at the same character boundary.
+Whitespace and the unescaped characters of a string come in runs, and the scanners above decode
+each character of a run only to learn that the run goes on. `scanWhile` finds where a run ends,
+and `scanBytes` finds the same place a byte at a time without decoding anything. That rests on
+how UTF-8 is built: a character of one byte is its own code point, below `0x80`, and every byte
+of a longer character is at least `0x80`. A byte test that agrees with the character test below
+`0x80`, and answers for every byte from `0x80` up what the character test answers for every
+character beyond ASCII, therefore stops at the same character boundary.
 -/
 
 /--
@@ -467,6 +467,21 @@ private theorem scanWhile_step {f : Char → Bool} {p q : s.Pos} {c : Char}
     subst h₂
     rw [ite_eq_left hf]
   · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
+
+/--
+A run stops where the next character fails the test, or at the end of the text. This is the other
+unfolding of `scanWhile`, covering both ways of stopping at once.
+
+`hstop` says that whatever character `step?` finds at `p`, if any, does not satisfy `f`; at the
+end of the text `step?` finds none and the hypothesis holds vacuously. The conclusion
+`scanWhile f p = p` says the run is empty.
+-/
+private theorem scanWhile_stop {f : Char → Bool} {p : s.Pos}
+    (hstop : ∀ c q, step? p = some (c, q) → f c = false) : scanWhile f p = p := by
+  rw [scanWhile]
+  split
+  · next c' q' hc' => rw [ite_eq_right (by simp [hstop c' q' hc'])]
+  · rfl
 
 /-- The byte offset at which a run of bytes satisfying `g`, having reached byte `i`, ends. -/
 @[specialize]
@@ -665,6 +680,109 @@ private theorem toNat_ge_of_utf8Size {c : Char} (hc : c.utf8Size ≠ 1) : 0x80 �
   simp only [UInt32.le_iff_toNat_le, UInt32.reduceToNat] at this
   show 0x80 ≤ c.val.toNat
   omega
+
+/-! ## Whitespace a run at a time -/
+
+/-- Where the whitespace starting at `p` ends. -/
+def wsEnd (p : s.Pos) : s.Pos := scanWhile Spec.isWs p
+
+/-- A byte that is whitespace, which only the one byte of a whitespace character can be. -/
+@[inline]
+def isWsByte (b : UInt8) : Bool := b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D
+
+/--
+For a character of one byte, the byte test for whitespace and the grammar's agree, which is the
+first condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes one byte, so `c.val.toUInt8` is that byte and has the value `c.toNat`.
+`isWsByte` asks for one of `0x20`, `0x09`, `0x0A` and `0x0D`, and `Spec.isWs c` for one of the
+four characters with those code points.
+-/
+theorem isWsByte_ascii (c : Char) (hc : c.utf8Size = 1) :
+    isWsByte c.val.toUInt8 = Spec.isWs c := by
+  have hn : c.toUInt8.toNat = c.toNat := (toNat_toUInt8 hc).1
+  rw [Bool.eq_iff_iff]
+  simp [isWsByte, Spec.isWs, ← UInt8.toNat_inj, ← Char.toNat_inj, hn]
+
+/--
+No byte from `0x80` up is whitespace, and no character beyond ASCII is, which is the second
+condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes more than one byte, so its code point is at least `0x80`, and `hb` says the
+byte `b` is at least `0x80`. Both tests answer `false`, since the four whitespace characters are
+all below `0x80`.
+-/
+theorem isWsByte_high (c : Char) (hc : c.utf8Size ≠ 1) (b : UInt8) (hb : 0x80 ≤ b) :
+    isWsByte b = Spec.isWs c := by
+  have hn := toNat_ge_of_utf8Size hc
+  simp only [UInt8.le_iff_toNat_le, UInt8.reduceToNat] at hb
+  rw [Bool.eq_iff_iff]
+  simp [isWsByte, Spec.isWs, ← UInt8.toNat_inj, ← Char.toNat_inj]
+  omega
+
+def wsEndFast (p : s.Pos) : s.Pos := scanBytesPos isWsByte Spec.isWs isWsByte_ascii isWsByte_high p
+
+/--
+The compiler is told to find the end of whitespace a byte at a time. Every proof speaks of
+`wsEnd`, a character at a time, and what runs is the byte scan.
+
+The equation `@wsEnd = @wsEndFast` is between the functions, over every text and position, as
+`@[csimp]` requires. `wsEndFast` is `scanBytesPos` with the whitespace tests, which
+`scanBytesPos_eq` equates with `scanWhile Spec.isWs`, the definition of `wsEnd`.
+-/
+@[csimp] theorem wsEnd_eq_wsEndFast : @wsEnd = @wsEndFast := by
+  funext s p
+  exact (scanBytesPos_eq _ _ _ _ p).symm
+
+/--
+`skipWs`, with the record built where it is used. `skipWs` returns its record from a loop, which
+in compiled code is an allocation on every call, however little whitespace there was.
+-/
+@[inline]
+def skipWsFast (start : s.Pos) : Consumed Unit start := ⟨(), wsEnd start, scanWhile_le _ start⟩
+
+/--
+The whitespace loop stops where the run of whitespace from its position ends. This is the form
+general enough to be an induction hypothesis, with the loop's position free.
+
+`(skipWs.go start p h).pos` is where the loop called at `p` stops, and `scanWhile Spec.isWs p` is
+the end of the run of whitespace from `p`. The induction follows `skipWs.go`, whose three cases
+are a whitespace character, any other character and the end of the text; `scanWhile_step` handles
+the first and `scanWhile_stop` the other two.
+-/
+private theorem skipWs_go_pos (start p : s.Pos) (h : p.remainingBytes ≤ start.remainingBytes) :
+    (skipWs.go start p h).pos = scanWhile Spec.isWs p := by
+  fun_induction skipWs.go start p h with
+  | case1 p h c q hc hw ih => rw [ih, scanWhile_step hc hw]
+  | case2 p h c q hc hw =>
+    refine (scanWhile_stop fun c' q' hc' => ?_).symm
+    rw [hc] at hc'
+    injection hc' with hc''
+    injection hc'' with h₁
+    rw [← h₁]
+    simpa using hw
+  | case3 p h hc =>
+    refine (scanWhile_stop fun c' q' hc' => ?_).symm
+    rw [hc] at hc'
+    exact absurd hc' (by simp)
+
+/--
+The compiler is told to run `skipWsFast` in place of `skipWs`, so that skipping whitespace,
+which the machine does around every token, costs no allocation. Every proof speaks of `skipWs`.
+
+The equation `@skipWs = @skipWsFast` is between the functions, over every text and position, as
+`@[csimp]` requires. A `Consumed Unit start` is determined by its position, its value being `()`
+and its bound a proof, and `skipWs_go_pos` says the two positions agree.
+-/
+@[csimp] theorem skipWs_eq_skipWsFast : @skipWs = @skipWsFast := by
+  funext s start
+  have hpos := skipWs_go_pos start start (Nat.le_refl _)
+  unfold skipWs skipWsFast wsEnd
+  generalize skipWs.go start start (Nat.le_refl _) = r at hpos
+  obtain ⟨⟨⟩, w, hw⟩ := r
+  simp only at hpos
+  subst hpos
+  rfl
 
 /-! ## Strings a run at a time -/
 
