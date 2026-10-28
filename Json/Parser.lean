@@ -378,6 +378,302 @@ where
   termination_by p.remainingBytes
   decreasing_by exact stringStep_char_lt p c q hs
 
+/-!
+`string` appends one character at a time, which in compiled code is an allocation and a push for
+each one. A run of unescaped characters stands for itself, so `stringFast` copies each run whole
+and goes through `stringStep` only where a run ends. The two are proved equal, so `string` is
+what the proofs speak of and `stringFast` is what runs.
+-/
+
+/--
+An unescaped character is read as itself. It is the commonest case by far, and the only one that
+consumes a single character.
+
+`hs` says `c` is the character at `p` and `hu` says it satisfies `isUnescaped`. The conclusion
+`stringStep p = .char c q` fixes the machine's answer exactly. The earlier branches, which test
+for `'"'` and `'\\'`, are excluded because `isUnescaped` holds of neither.
+-/
+theorem stringStep_unescaped {p q : s.Pos} {c : Char} (hs : step? p = some (c, q))
+    (hu : Spec.isUnescaped c = true) : stringStep p = .char c q := by
+  rw [stringStep]
+  split
+  · next hc => rw [hs] at hc; exact absurd hc (by simp)
+  · next w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc
+    rw [hcc] at hu
+    exact absurd hu (by decide)
+  · next w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc
+    rw [hcc] at hu
+    exact absurd hu (by decide)
+  · next c' w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc hww
+    subst hcc
+    subst hww
+    rw [ite_eq_left hu]
+
+/--
+What `step?` found, in the terms of the `String` library: the position is not the end, the
+character is the one there and the next position is the one after it. Lemmas about slices of a
+string are stated in those terms, so this is how a step of the scanner reaches them.
+
+`h : step? p = some (c, q)` says `step?` found `c` at `p` and moved to `q`. The conclusion
+supplies `hp : p ≠ s.endPos` together with `p.get hp = c` and `p.next hp = q`. `step?` answers
+`some` only in its branch that has such an `hp`, and there it returns exactly that pair.
+-/
+private theorem step?_eq_some {p q : s.Pos} {c : Char} (h : step? p = some (c, q)) :
+    ∃ hp : p ≠ s.endPos, p.get hp = c ∧ p.next hp = q := by
+  rw [step?] at h
+  split at h
+  · simp at h
+  · next hp =>
+    rw [Option.some.injEq, Prod.mk.injEq] at h
+    exact ⟨hp, h.1, h.2⟩
+
+/-- Where the run of unescaped characters that starts at `p` ends. -/
+def unescapedEnd (p : s.Pos) : s.Pos :=
+  match _hc : step? p with
+  | some (c, q) => if Spec.isUnescaped c then unescapedEnd q else p
+  | none => p
+termination_by p.remainingBytes
+decreasing_by exact step?_lt _hc
+
+/--
+A run ends at or after where it starts. A slice of the text needs its start no later than its
+end, and the string loop needs the run's end to leave no more text than its start did; both come
+from this.
+
+`p ≤ unescapedEnd p` compares positions in the text, so it says the end of the run beginning at
+`p` lies at `p` or further on. The induction follows `unescapedEnd`: a run that stops at once
+ends at `p` itself, and one that continues ends where the run from the next character does, which
+is past `p` by `String.Pos.lt_next`.
+-/
+private theorem le_unescapedEnd (p : s.Pos) : p ≤ unescapedEnd p := by
+  fun_induction unescapedEnd p with
+  | case1 p c q hc hu ih =>
+    obtain ⟨hp, -, rfl⟩ := step?_eq_some hc
+    exact String.Pos.le_of_lt (String.Pos.lt_of_lt_of_le String.Pos.lt_next ih)
+  | case2 => exact String.Pos.le_refl _
+  | case3 => exact String.Pos.le_refl _
+
+/--
+Skipping a run never leaves more text than there was, which is the form the string loop's
+termination argument takes.
+
+`(unescapedEnd p).remainingBytes ≤ p.remainingBytes` says the bytes left after the run are at
+most the bytes left at its start. It is `le_unescapedEnd` read through
+`String.Pos.le_iff_remainingBytes_le`, which turns an order on positions into the reverse order
+on what remains.
+-/
+private theorem unescapedEnd_le (p : s.Pos) :
+    (unescapedEnd p).remainingBytes ≤ p.remainingBytes :=
+  (String.Pos.le_iff_remainingBytes_le _ _).mp (le_unescapedEnd p)
+
+/--
+A run that continues past its first character ends where the run from the next character ends.
+This is the unfolding of `unescapedEnd` the string loop's correspondence steps through.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hu` says `c` is
+unescaped. The equation `unescapedEnd p = unescapedEnd q` then holds because `unescapedEnd` takes
+its continuing branch at `p`, whose result is by definition the run from `q`.
+-/
+private theorem unescapedEnd_unescaped {p q : s.Pos} {c : Char} (hc : step? p = some (c, q))
+    (hu : Spec.isUnescaped c = true) : unescapedEnd p = unescapedEnd q := by
+  rw [unescapedEnd]
+  split
+  · next c' q' hc' =>
+    rw [hc] at hc'
+    injection hc' with hc''
+    injection hc'' with h₁ h₂
+    subst h₁
+    subst h₂
+    rw [ite_eq_left hu]
+  · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
+
+/-- `acc` followed by the text from `p` to `q`, which is that text itself when `acc` is empty. -/
+def appendRun (acc : String) (p q : s.Pos) : String :=
+  if acc.isEmpty then s.extract p q else acc ++ s.extract p q
+
+/--
+Leaving out the empty accumulator changes nothing. It saves a copy on the commonest string of
+all, one with no escape, whose whole content is a single run appended to `""`.
+
+`appendRun acc p q` is the text from `p` to `q` when `acc` is empty and `acc` followed by it
+otherwise; `acc ++ s.extract p q` is the latter in every case. The two agree because `"" ++ t` is
+`t`.
+-/
+private theorem appendRun_eq (acc : String) (p q : s.Pos) :
+    appendRun acc p q = acc ++ s.extract p q := by
+  unfold appendRun
+  split
+  · next h => rw [String.isEmpty_iff.mp h, String.empty_append]
+  · rfl
+
+/--
+Pushing a run's first character and then copying the rest of the run is copying the whole run.
+This is the step that lets one copy stand for a push per character.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hq` says the run's end
+`e` is not before `q`. The equation says `acc.push c` followed by the text from `q` to `e` is
+`acc` followed by the text from `p` to `e`. `String.copy_slice_eq_append_of_lt` splits the latter
+text into its first character and the rest, and `String.append_singleton` identifies appending
+that character with pushing it.
+-/
+private theorem push_append_extract {p q e : s.Pos} {c : Char} (hc : step? p = some (c, q))
+    (hq : q ≤ e) (acc : String) : acc.push c ++ s.extract q e = acc ++ s.extract p e := by
+  obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+  have hlt : p < e := String.Pos.lt_of_lt_of_le String.Pos.lt_next hq
+  rw [String.extract_eq_copy_slice _ _ hq,
+    String.extract_eq_copy_slice _ _ (String.Pos.le_of_lt hlt),
+    String.copy_slice_eq_append_of_lt hlt, ← String.append_singleton, String.append_assoc]
+
+/--
+The string loop called at the same position with the same accumulator gives the same result,
+whatever proof of its bound it carries. The loop's results are compared at positions computed in
+two ways, so they have to be matched up to an equation rather than syntactically.
+
+`hp` and `hacc` say the positions and the accumulators are equal; `h` and `h'` are the bounds
+each call carries. Once the equations are substituted, the bounds are proofs of one proposition,
+and so are the same.
+-/
+private theorem string_go_congr {start p p' : s.Pos} {acc acc' : String} (hp : p = p')
+    (hacc : acc = acc') (h : p.remainingBytes ≤ start.remainingBytes)
+    (h' : p'.remainingBytes ≤ start.remainingBytes) :
+    string.go start p acc h = string.go start p' acc' h' := by
+  subst hp
+  subst hacc
+  rfl
+
+/--
+One turn of the string loop on an unescaped character pushes it and carries on from the next
+position. This is the unfolding of `string.go` that a run is made of, stated as an equation
+because the loop's bound argument keeps `rw` from unfolding it in place.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hu` says it is
+unescaped. The equation relates the loop at `p` with accumulator `acc` to the loop at `q` with
+`acc.push c`; `h` and `h'` are their bounds. `stringStep_unescaped` fixes what the loop's one
+`stringStep` returns, which rules out its other two branches.
+-/
+private theorem string_go_unescaped {start p q : s.Pos} {c : Char} (hc : step? p = some (c, q))
+    (hu : Spec.isUnescaped c = true) (acc : String) (h : p.remainingBytes ≤ start.remainingBytes)
+    (h' : q.remainingBytes ≤ start.remainingBytes) :
+    string.go start p acc h = string.go start q (acc.push c) h' := by
+  rw [string.go]
+  split
+  · next e hs => rw [stringStep_unescaped hc hu] at hs; simp at hs
+  · next r hs => rw [stringStep_unescaped hc hu] at hs; simp at hs
+  · next c' r hs =>
+    rw [stringStep_unescaped hc hu] at hs
+    injection hs with h₁ h₂
+    subst h₁
+    subst h₂
+    rfl
+
+/--
+The string loop passes over a run of unescaped characters as one copy of the run. This is the
+whole difference between `string` and `stringFast`, which otherwise take the same steps.
+
+`string.go start p acc h` is the loop at `p` holding `acc`. The equation says it equals the loop
+at `unescapedEnd p`, the end of the run, holding `acc` followed by the run's text
+`s.extract p (unescapedEnd p)`; `h'` is that call's bound. The induction follows `unescapedEnd`:
+where the run stops at once the text is empty, and where it continues `string_go_unescaped`
+takes one character and `push_append_extract` moves it into the copy.
+-/
+private theorem string_go_run (start p : s.Pos) :
+    ∀ (acc : String) (h : p.remainingBytes ≤ start.remainingBytes)
+      (h' : (unescapedEnd p).remainingBytes ≤ start.remainingBytes),
+      string.go start p acc h =
+        string.go start (unescapedEnd p) (acc ++ s.extract p (unescapedEnd p)) h' := by
+  fun_induction unescapedEnd p with
+  | case1 p c q hc hu ih =>
+    intro acc h h'
+    have hq : q.remainingBytes ≤ start.remainingBytes := by have := step?_lt hc; omega
+    rw [string_go_unescaped hc hu acc h hq, ih (acc.push c) hq h']
+    exact string_go_congr rfl (push_append_extract hc (le_unescapedEnd q) acc) _ _
+  | case2 | case3 =>
+    intro acc h h'
+    rw [String.extract_eq_copy_slice _ _ (String.Pos.le_refl _), String.copy_slice_self,
+      String.append_empty]
+
+def stringFast (start : s.Pos) (acc : String) : Except Error (Scanned String start) :=
+  go start acc (Nat.le_refl _)
+where
+  go (p : s.Pos) (acc : String) (h : p.remainingBytes ≤ start.remainingBytes) :
+      Except Error (Scanned String start) :=
+    match hs : stringStep (unescapedEnd p) with
+    | .fail e => .error e
+    | .done q =>
+      .ok ⟨appendRun acc p (unescapedEnd p), q, by
+        have := stringStep_done_lt _ q hs; have := unescapedEnd_le p; omega⟩
+    | .char c q =>
+      go q ((appendRun acc p (unescapedEnd p)).push c) (by
+        have := stringStep_char_lt _ c q hs; have := unescapedEnd_le p; omega)
+  termination_by p.remainingBytes
+  decreasing_by have := stringStep_char_lt _ c q hs; have := unescapedEnd_le p; omega
+
+/--
+The run-copying loop and the character loop agree at every position and accumulator, which is
+the form general enough to be an induction hypothesis.
+
+`stringFast.go start p acc h` and `string.go start p acc h` are the two loops at `p` holding
+`acc`, with the same bound `h`. The induction follows `stringFast.go`, whose three cases are what
+`stringStep` reports at the end of the run. In each, `string_go_run` carries `string.go` to the
+same place with the run appended, after which both loops take the same branch; `appendRun_eq`
+identifies their accumulators.
+-/
+private theorem stringFast_go_eq (start p : s.Pos) (acc : String)
+    (h : p.remainingBytes ≤ start.remainingBytes) :
+    stringFast.go start p acc h = string.go start p acc h := by
+  fun_induction stringFast.go start p acc h with
+  | case1 p acc h err hs =>
+    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    split
+    · next e hs' => rw [hs] at hs'; injection hs' with hh; subst hh; rfl
+    · next r hs' => rw [hs] at hs'; simp at hs'
+    · next c r hs' => rw [hs] at hs'; simp at hs'
+  | case2 p acc h q hs =>
+    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    split
+    · next e hs' => rw [hs] at hs'; simp at hs'
+    · next r hs' =>
+      rw [hs] at hs'
+      injection hs' with hh
+      subst hh
+      simp only [appendRun_eq]
+    · next c r hs' => rw [hs] at hs'; simp at hs'
+  | case3 p acc h c q hs ih =>
+    rw [string_go_run start p acc h (Nat.le_trans (unescapedEnd_le p) h), string.go]
+    split
+    · next e hs' => rw [hs] at hs'; simp at hs'
+    · next r hs' => rw [hs] at hs'; simp at hs'
+    · next c' r hs' =>
+      rw [hs] at hs'
+      injection hs' with h₁ h₂
+      subst h₁
+      subst h₂
+      rw [ih]
+      exact string_go_congr rfl (by rw [appendRun_eq]) _ _
+
+/--
+The compiler is told to read strings a run at a time in place of a character at a time.
+Everything proved about strings speaks of `string`, everything executed is `stringFast`, and this
+is what makes those the same program.
+
+The equation `@string = @stringFast` is between the functions themselves, over every text,
+starting position and accumulator, which is what `@[csimp]` requires before it will substitute
+one for the other in compiled code. It is `stringFast_go_eq` at the loop's entry, where both
+start at `start` with the given accumulator.
+-/
+@[csimp] theorem string_eq_stringFast : @string = @stringFast := by
+  funext s start acc
+  exact (stringFast_go_eq start start acc _).symm
+
 /-! ## Numbers -/
 
 /-- `*DIGIT`, accumulating the most significant digit first, and as a loop for the same reason. -/
