@@ -916,10 +916,21 @@ array and the index of the next entry, so an entry that is not a container costs
 nothing on the heap.
 -/
 
+def spaceBlock : String := "".pushn ' ' 32
+
+/-- `acc.pushn ' ' n`, appending whole blocks of spaces while there are many to write. -/
+def pushSpaces (acc : String) (n : Nat) : String :=
+  if n < 32 then acc.pushn ' ' n else pushSpaces (acc ++ spaceBlock) (n - 32)
+termination_by n
+decreasing_by omega
+
 def Style.lineBreakTo (st : Style) (acc : String) (depth : Nat) : String :=
   match st.indent with
   | none => acc
-  | some k => (acc.push '\n').pushn ' ' (k * depth)
+  | some k =>
+    -- The usual indentation is short, and is pushed without a call to `pushSpaces`.
+    let n := k * depth
+    if n < 32 then (acc.push '\n').pushn ' ' n else pushSpaces (acc.push '\n') n
 
 def Style.precedesTo (st : Style) (acc : String) (depth : Nat) (first : Bool) : String :=
   if first then acc else st.lineBreakTo (acc.push ',') depth
@@ -943,6 +954,26 @@ def scalarTo (acc : String) : Json → String
   | .arr _ | .obj _ => acc
 
 /--
+Writing spaces a block at a time appends exactly as many spaces as pushing them one by one. Deep
+indentation is written this way, where one push per space would dominate the cost of `pretty`.
+
+`(pushSpaces acc n).toList` is the text produced and `List.replicate n ' '` is `n` spaces; the
+induction is strong recursion on `n`, taking off one block of 32 at each step.
+-/
+private theorem toList_pushSpaces (acc : String) (n : Nat) :
+    (pushSpaces acc n).toList = acc.toList ++ List.replicate n ' ' := by
+  induction n using Nat.strongRecOn generalizing acc with
+  | ind n ih =>
+    rw [pushSpaces]
+    split
+    · exact toList_pushn acc ' ' n
+    · next h =>
+      rw [ih (n - 32) (by omega), String.toList_append, spaceBlock, toList_pushn,
+        List.append_assoc, String.toList_empty, List.nil_append, List.replicate_append_replicate]
+      congr 2
+      omega
+
+/--
 Writing a line break onto the accumulated text is appending the break `render` builds. The
 compact form writes nothing, and the pretty form a newline and the indentation.
 
@@ -954,7 +985,9 @@ private theorem lineBreakTo_eq (st : Style) (acc : String) (depth : Nat) :
   rw [Style.lineBreakTo, Style.lineBreak]
   split
   · simp
-  · rw [← String.toList_inj]; simp [toList_pushn, spaces]
+  · rw [← String.toList_inj]
+    simp only
+    split <;> simp [toList_pushn, toList_pushSpaces, spaces]
 
 /--
 Writing a break and then a closing bracket onto the accumulated text is appending the closing text
