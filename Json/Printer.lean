@@ -421,6 +421,103 @@ def escapeCharTo (acc : String) (c : Char) : String :=
 
 def escapeTo (acc : String) (s : String) : String := s.foldl escapeCharTo acc
 
+/-! Most characters stand for themselves, so what runs copies each stretch of them in one append
+and visits `escapeCharTo` only for the characters that change. -/
+
+def needsEscape (c : Char) : Bool := c.val < 0x20 || c == '"' || c == '\\'
+
+/--
+`s` from `p` on escaped onto `acc`, where the characters from `start` up to `p` stand for
+themselves and are still to be copied.
+-/
+def escapeRunTo (s acc : String) (start p : s.Pos) : String :=
+  if h : p = s.endPos then
+    if start = s.startPos then acc ++ s else acc ++ s.extract start p
+  else
+    let c := p.get h
+    if needsEscape c then escapeRunTo s (escapeCharTo (acc ++ s.extract start p) c) (p.next h) (p.next h)
+    else escapeRunTo s acc start (p.next h)
+termination_by p
+decreasing_by all_goals exact String.Pos.lt_next
+
+def escapeToFast (acc s : String) : String := escapeRunTo s acc s.startPos s.startPos
+
+/--
+A character that needs no escape is written as itself. This is what lets a stretch of such
+characters be copied in one append rather than offered to `escapeCharTo` one at a time.
+
+`h : needsEscape c = false` says `c` is neither a control character, a quotation mark nor a
+backslash, which are exactly the characters `escapeCharTo` treats specially; the equation says
+that otherwise it pushes `c` onto `acc` unchanged.
+-/
+private theorem escapeCharTo_of_not_needsEscape {c : Char} (acc : String)
+    (h : needsEscape c = false) : escapeCharTo acc c = acc.push c := by
+  simp only [needsEscape, Bool.or_eq_false_iff, beq_eq_false_iff_ne, ne_eq,
+    decide_eq_false_iff_not] at h
+  obtain ⟨⟨hlt, hq⟩, hb⟩ := h
+  have hlt' : ¬ c.toNat < 0x20 := by rw [UInt32.lt_iff_toNat_lt] at hlt; exact hlt
+  fun_cases escapeCharTo acc c <;> first | rfl | simp_all | exact absurd (by decide) hlt
+
+/--
+Copying by stretches writes what escaping one character at a time writes. The invariant carries
+the stretch still to be copied, so the claim covers every point of the scan, not only its start.
+
+`start` splits `s` into `t₁` and `r ++ t₂`, and `p` splits it into `t₁ ++ r` and `t₂`: so `r` is
+the text between `start` and `p`, waiting to be copied, and `t₂` is what is still to be scanned.
+The conclusion says the scan produces `acc` and `r`, followed by `t₂` folded through
+`escapeCharTo`, which is `escapeTo`'s own definition.
+-/
+private theorem escapeRunTo_eq (s acc : String) (start p : s.Pos) :
+    ∀ (t₁ r t₂ : String), start.Splits t₁ (r ++ t₂) → p.Splits (t₁ ++ r) t₂ →
+    escapeRunTo s acc start p = t₂.toList.foldl escapeCharTo (acc ++ r) := by
+  fun_induction escapeRunTo s acc start p with
+  | case1 acc =>
+    intro t₁ r t₂ h₁ h₂
+    obtain rfl : t₂ = "" := h₂.eq_endPos_iff.mp rfl
+    obtain rfl : t₁ = "" := h₁.eq_startPos_iff.mp rfl
+    have hs : s = r := by simpa using h₁.eq_append
+    simp [hs]
+  | case2 acc start _ =>
+    intro t₁ r t₂ h₁ h₂
+    obtain rfl : t₂ = "" := h₂.eq_endPos_iff.mp rfl
+    obtain ⟨hle, hr⟩ := String.copy_slice_eq_iff_splits.mpr ⟨t₁, "", h₁, h₂⟩
+    rw [String.extract_eq_copy_slice _ _ hle, hr]
+    simp
+  | case3 acc start p h c hc ih =>
+    intro t₁ r t₂ h₁ h₂
+    obtain ⟨t₂', rfl⟩ := h₂.exists_eq_singleton_append h
+    have h₂' := h₂.next
+    obtain ⟨hle, hr⟩ := String.copy_slice_eq_iff_splits.mpr
+      ⟨t₁, String.singleton (p.get h) ++ t₂', h₁, h₂⟩
+    rw [ih (t₁ ++ r ++ String.singleton (p.get h)) "" t₂' (by simpa using h₂')
+      (by simpa using h₂'), String.extract_eq_copy_slice _ _ hle, hr]
+    simp [String.toList_append, c]
+  | case4 acc start p h c hc ih =>
+    intro t₁ r t₂ h₁ h₂
+    obtain ⟨t₂', rfl⟩ := h₂.exists_eq_singleton_append h
+    have h₂' := h₂.next
+    rw [ih t₁ (r ++ String.singleton (p.get h)) t₂' (by rw [String.append_assoc]; exact h₁)
+      (by rw [← String.append_assoc]; exact h₂'), String.toList_append, String.toList_singleton,
+      List.singleton_append, List.foldl_cons,
+      escapeCharTo_of_not_needsEscape _ (Bool.eq_false_iff.mpr hc), ← String.append_assoc,
+      String.append_singleton]
+
+/--
+Escaping a string by stretches writes exactly what escaping it a character at a time writes.
+Every claim tying string literals to the grammar is about `escapeTo`, and what runs is
+`escapeToFast`; this makes them one program.
+
+`@escapeTo = @escapeToFast` equates the functions over every accumulator and string, as
+`@[csimp]` requires. `escapeToFast` starts the scan at the start of `s` with nothing pending,
+where `escapeRunTo_eq` gives `s` folded through `escapeCharTo` onto `acc`, the definition of
+`escapeTo`.
+-/
+@[csimp] theorem escapeTo_eq_escapeToFast : @escapeTo = @escapeToFast := by
+  funext acc s
+  rw [escapeToFast, escapeRunTo_eq s acc _ _ "" "" s (by simp) (by simp), escapeTo,
+    String.foldl_eq_foldl_toList]
+  simp
+
 /-- `s` as a string literal, quotation marks included, appended to `acc`. -/
 def stringTo (acc : String) (s : String) : String := (escapeTo (acc.push '"') s).push '"'
 
