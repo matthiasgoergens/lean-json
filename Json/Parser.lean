@@ -1388,10 +1388,17 @@ def digitsUpTo (start p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.rem
 /--
 How many digits after the first are read by folding before the rest of a run is handed to the
 halving reader. Every number a parse sees starts with one digit already read, so a run of up to
-eighteen is folded into a value below `2 ^ 63`, which needs no allocation, and only longer runs
-pay for building a list.
+eighteen is folded into a value below `2 ^ 63`, which on a 64-bit platform needs no allocation,
+and only longer runs pay for building a list. It is a literal because the compiler folds a literal
+into its uses but computes a formula once at startup and checks for it at every use;
+`foldedDigits_bound` checks the formula instead.
 -/
 def foldedDigits : Nat := 17
+
+/-- The most digits that stay below `2 ^ 63` when folded: one more would not. -/
+theorem foldedDigits_bound :
+    10 ^ (foldedDigits + 1) ≤ 2 ^ 63 ∧ 2 ^ 63 < 10 ^ (foldedDigits + 2) := by
+  decide
 
 def digitsFast (start : s.Pos) (value count : Nat) : Consumed (Nat × Nat) start :=
   let r := digitsUpTo start start value count (Nat.le_refl _) foldedDigits
