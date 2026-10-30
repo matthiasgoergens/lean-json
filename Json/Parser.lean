@@ -188,6 +188,102 @@ def expect? (p : s.Pos) : List Char → Option (Consumed Unit p)
       else none
     | none => none
 
+/--
+Where the text at `p` ends, if it begins with the characters of `l`. Unlike `expect?` it builds
+no record on the way back, so it runs as a loop.
+-/
+def expectEnd (p : s.Pos) : List Char → Option s.Pos
+  | [] => some p
+  | c :: rest =>
+    match step? p with
+    | some (c', q) => if c == c' then expectEnd q rest else none
+    | none => none
+
+/--
+Matching a literal never moves backwards, which is the bound the record `expectFast?` builds has
+to carry.
+
+`h : expectEnd p l = some q` says the text at `p` begins with `l` and `q` is where it ends. The
+conclusion `q.remainingBytes ≤ p.remainingBytes` says no more text remains after the literal than
+before it. The induction is on `l`: the empty literal ends at `p`, and each character matched is
+one `step?`, which `step?_lt` says consumes text.
+-/
+theorem expectEnd_le : ∀ (l : List Char) (p q : s.Pos), expectEnd p l = some q →
+    q.remainingBytes ≤ p.remainingBytes
+  | [], p, q, h => by
+    rw [expectEnd, Option.some.injEq] at h
+    subst h
+    exact Nat.le_refl _
+  | c :: rest, p, q, h => by
+    rw [expectEnd] at h
+    split at h
+    · next c' r hc =>
+      split at h
+      · have := expectEnd_le rest r q h
+        have := step?_lt hc
+        omega
+      · simp at h
+    · simp at h
+
+/--
+`expect?` and `expectEnd` find the same end, or both find none. This is the whole content of
+`expect?`, whose record holds nothing but that position and a proof.
+
+`(expect? p l).map Consumed.pos` is where `expect?` says the literal `l` at `p` ends, if it
+matches, and `expectEnd p l` is the same question answered by the loop. The induction is on `l`,
+following the two definitions' identical case analysis of `step?` and of the comparison.
+-/
+private theorem expect?_pos : ∀ (l : List Char) (p : s.Pos),
+    (expect? p l).map Consumed.pos = expectEnd p l
+  | [], p => rfl
+  | c :: rest, p => by
+    rw [expect?, expectEnd]
+    split
+    · next c' q hc =>
+      simp only [hc]
+      split
+      · rw [← expect?_pos rest q]
+        cases expect? q rest <;> rfl
+      · rfl
+    · next hc => simp only [hc]; rfl
+
+/-- `expect?`, with the record built where it is used rather than on every character. -/
+@[inline]
+def expectFast? (p : s.Pos) (l : List Char) : Option (Consumed Unit p) :=
+  match h : expectEnd p l with
+  | some q => some ⟨(), q, expectEnd_le l p q h⟩
+  | none => none
+
+/--
+The compiler is told to match literals with the loop. Every proof speaks of `expect?`, and what
+runs is `expectFast?`, which builds its record once rather than again for every character on the
+way back out of a recursion.
+
+The equation `@expect? = @expectFast?` is between the functions, over every text, position and
+literal, as `@[csimp]` requires. A record `Consumed Unit p` is determined by its position, so the
+two agree wherever their positions do, which is `expect?_pos`.
+-/
+@[csimp] theorem expect?_eq_expectFast? : @expect? = @expectFast? := by
+  funext s p l
+  have hpos := expect?_pos l p
+  unfold expectFast?
+  split
+  · next q h =>
+    rw [h] at hpos
+    cases he : expect? p l with
+    | none => rw [he] at hpos; simp at hpos
+    | some r =>
+      rw [he] at hpos
+      obtain ⟨⟨⟩, w, hw⟩ := r
+      simp only [Option.map_some, Option.some.injEq] at hpos
+      subst hpos
+      rfl
+  · next h =>
+    rw [h] at hpos
+    cases he : expect? p l with
+    | none => rfl
+    | some r => rw [he] at hpos; simp at hpos
+
 /-- One hexadecimal digit, as a number. -/
 def hexDigit? (p : s.Pos) : Option (Scanned Nat p) :=
   match hc : step? p with
@@ -378,6 +474,780 @@ where
   termination_by p.remainingBytes
   decreasing_by exact stringStep_char_lt p c q hs
 
+/-! ## Scanning a byte at a time -/
+
+/-!
+Whitespace and the unescaped characters of a string come in runs, and the scanners above decode
+each character of a run only to learn that the run goes on. `scanWhile` finds where a run ends,
+and `scanBytes` finds the same place a byte at a time without decoding anything. That rests on
+how UTF-8 is built: a character of one byte is its own code point, below `0x80`, and every byte
+of a longer character is at least `0x80`. A byte test that agrees with the character test below
+`0x80`, and answers for every byte from `0x80` up what the character test answers for every
+character beyond ASCII, therefore stops at the same character boundary.
+-/
+
+/--
+What `step?` found, in the terms of the `String` library: the position is not the end, the
+character is the one there and the next position is the one after it. Lemmas about slices and
+bytes of a string are stated in those terms, so this is how a step of the scanner reaches them.
+
+`h : step? p = some (c, q)` says `step?` found `c` at `p` and moved to `q`. The conclusion
+supplies `hp : p ≠ s.endPos` together with `p.get hp = c` and `p.next hp = q`. `step?` answers
+`some` only in its branch that has such an `hp`, and there it returns exactly that pair.
+-/
+private theorem step?_eq_some {p q : s.Pos} {c : Char} (h : step? p = some (c, q)) :
+    ∃ hp : p ≠ s.endPos, p.get hp = c ∧ p.next hp = q := by
+  rw [step?] at h
+  split at h
+  · simp at h
+  · next hp =>
+    rw [Option.some.injEq, Prod.mk.injEq] at h
+    exact ⟨hp, h.1, h.2⟩
+
+/-- Where the run of characters satisfying `f` that starts at `p` ends. -/
+def scanWhile (f : Char → Bool) (p : s.Pos) : s.Pos :=
+  match _hc : step? p with
+  | some (c, q) => if f c then scanWhile f q else p
+  | none => p
+termination_by p.remainingBytes
+decreasing_by exact step?_lt _hc
+
+/--
+A run ends at or after where it starts. A slice of the text needs its start no later than its
+end, and a loop that skips a run needs the run's end to leave no more text than its start did;
+both come from this.
+
+`p ≤ scanWhile f p` compares positions in the text, so it says the end of the run of characters
+satisfying `f` from `p` lies at `p` or further on. The induction follows `scanWhile`: a run that
+stops at once ends at `p` itself, and one that continues ends where the run from the next
+character does, which is past `p` by `String.Pos.lt_next`.
+-/
+private theorem le_scanWhile (f : Char → Bool) (p : s.Pos) : p ≤ scanWhile f p := by
+  fun_induction scanWhile f p with
+  | case1 p c q hc hf ih =>
+    obtain ⟨hp, -, rfl⟩ := step?_eq_some hc
+    exact String.Pos.le_of_lt (String.Pos.lt_of_lt_of_le String.Pos.lt_next ih)
+  | case2 => exact String.Pos.le_refl _
+  | case3 => exact String.Pos.le_refl _
+
+/--
+Skipping a run never leaves more text than there was, which is the form the loops' termination
+arguments and the scanners' records take.
+
+`(scanWhile f p).remainingBytes ≤ p.remainingBytes` says the bytes left after the run are at most
+the bytes left at its start. It is `le_scanWhile` read through
+`String.Pos.le_iff_remainingBytes_le`, which turns the order on positions into the reverse order
+on what remains.
+-/
+theorem scanWhile_le (f : Char → Bool) (p : s.Pos) :
+    (scanWhile f p).remainingBytes ≤ p.remainingBytes :=
+  (String.Pos.le_iff_remainingBytes_le _ _).mp (le_scanWhile f p)
+
+/--
+A run that continues past its first character ends where the run from the next character ends.
+This is the unfolding of `scanWhile` that a loop taking one character at a time is compared with.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hf` says `c` satisfies
+`f`. The equation `scanWhile f p = scanWhile f q` holds because `scanWhile` takes its continuing
+branch at `p`, whose result is by definition the run from `q`.
+-/
+private theorem scanWhile_step {f : Char → Bool} {p q : s.Pos} {c : Char}
+    (hc : step? p = some (c, q)) (hf : f c = true) : scanWhile f p = scanWhile f q := by
+  rw [scanWhile]
+  split
+  · next c' q' hc' =>
+    rw [hc] at hc'
+    injection hc' with hc''
+    injection hc'' with h₁ h₂
+    subst h₁
+    subst h₂
+    rw [ite_eq_left hf]
+  · next hc' => rw [hc] at hc'; exact absurd hc' (by simp)
+
+/--
+A run stops where the next character fails the test, or at the end of the text. This is the other
+unfolding of `scanWhile`, covering both ways of stopping at once.
+
+`hstop` says that whatever character `step?` finds at `p`, if any, does not satisfy `f`; at the
+end of the text `step?` finds none and the hypothesis holds vacuously. The conclusion
+`scanWhile f p = p` says the run is empty.
+-/
+private theorem scanWhile_stop {f : Char → Bool} {p : s.Pos}
+    (hstop : ∀ c q, step? p = some (c, q) → f c = false) : scanWhile f p = p := by
+  rw [scanWhile]
+  split
+  · next c' q' hc' => rw [ite_eq_right (by simp [hstop c' q' hc'])]
+  · rfl
+
+/-- The byte offset at which a run of bytes satisfying `g`, having reached byte `i`, ends. -/
+@[specialize]
+def scanBytes (s : String) (g : UInt8 → Bool) (i : Nat) : Nat :=
+  if h : i < s.utf8ByteSize then
+    if g (s.getUTF8Byte ⟨i⟩ h) then scanBytes s g (i + 1) else i
+  else i
+termination_by s.utf8ByteSize - i
+
+/--
+The bytes of the text at a position are the UTF-8 encoding of the character there. This is what
+connects the byte scan, which looks at `s.toByteArray`, to `step?`, which decodes characters.
+
+`hp` says `p` is not the end, so `p.get hp` is a character, and `hk` picks one of its
+`utf8Size` bytes. The equation says the byte `k` places after `p` is byte `k` of
+`String.utf8EncodeChar (p.get hp)`. It is `String.Pos.utf8Encode_get_eq_extract`, which states
+the encoding of the character as a slice of the text's bytes, read at index `k`.
+-/
+private theorem byte_get {p : s.Pos} (hp : p ≠ s.endPos) {k : Nat}
+    (hk : k < (p.get hp).utf8Size) (h : p.offset.byteIdx + k < s.toByteArray.size) :
+    s.toByteArray[p.offset.byteIdx + k] =
+      (String.utf8EncodeChar (p.get hp))[k]'(by simpa using hk) := by
+  have e := p.utf8Encode_get_eq_extract hp
+  rw [← ByteArray.getElem_extract (stop := p.offset.byteIdx + (p.get hp).utf8Size)
+    (by rw [← e, List.utf8Encode_singleton]; simpa using hk)]
+  simp only [← e, List.utf8Encode_singleton, List.getElem_toByteArray]
+
+/--
+Every byte of a character UTF-8 spells with more than one byte is at least `0x80`, so no byte
+inside such a character can be mistaken for an ASCII character.
+
+`hc` says `c` takes more than one byte, and `k` indexes one of the bytes of
+`String.utf8EncodeChar c`. The conclusion is that byte is at least `0x80`. The library spells out
+the encoding for each length; every byte in it is some value ored with `0x80`, `0xC0`, `0xE0` or
+`0xF0`, each at least `0x80`, and oring cannot make a byte smaller.
+-/
+private theorem utf8EncodeChar_ge {c : Char} (hc : c.utf8Size ≠ 1) (k : Nat)
+    (hk : k < (String.utf8EncodeChar c).length) : 0x80 ≤ (String.utf8EncodeChar c)[k] := by
+  have h80 : ∀ m x : UInt8, 0x80 ≤ m → 0x80 ≤ x ||| m := fun m x hm =>
+    UInt8.le_trans hm (by rw [UInt8.le_iff_toNat_le, UInt8.toNat_or]; exact Nat.right_le_or)
+  have hk' : k < c.utf8Size := by simpa using hk
+  rcases c.utf8Size_eq with h | h | h | h
+  · exact absurd h hc
+  · simp only [String.utf8EncodeChar_eq_cons_cons h]
+    rcases k with _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+  · simp only [String.utf8EncodeChar_eq_cons_cons_cons h]
+    rcases k with _ | _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+  · simp only [String.utf8EncodeChar_eq_cons_cons_cons_cons h]
+    rcases k with _ | _ | _ | _ | k
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · exact h80 _ _ (by decide)
+    · omega
+
+/--
+The byte scan passes over any stretch of bytes that all satisfy its test, so the proof can step
+over a whole character at once while the code takes a byte at a time.
+
+`n` bytes from offset `i` lie within the text by the first hypothesis, and the second says each
+of them satisfies `g`. The equation says the scan from `i` ends where the scan from `i + n` does.
+The induction is on `n`: each byte passed is one turn of `scanBytes`.
+-/
+private theorem scanBytes_skip (s : String) (g : UInt8 → Bool) :
+    ∀ (n i : Nat), i + n ≤ s.utf8ByteSize →
+      (∀ k (h : i + k < s.toByteArray.size), k < n → g s.toByteArray[i + k] = true) →
+      scanBytes s g i = scanBytes s g (i + n)
+  | 0, i, _, _ => rfl
+  | n + 1, i, hn, hb => by
+    have hi : i < s.utf8ByteSize := by omega
+    rw [scanBytes, dite_eq_left hi, ite_eq_left (by
+        rw [String.getUTF8Byte_eq_getElem]; simpa using hb 0 (by simpa using hi) (by omega)),
+      scanBytes_skip s g n (i + 1) (by omega) (fun k h hk => by
+        have := hb (k + 1) (by simp only [String.size_toByteArray]; omega) (by omega)
+        simpa only [show i + (k + 1) = i + 1 + k by omega] using this),
+      show i + 1 + n = i + (n + 1) by omega]
+
+/--
+The byte scan ends a run exactly where the character scan does, for any pair of tests related as
+UTF-8 allows. This is the one fact about UTF-8 the parser relies on beyond what the `String`
+library provides.
+
+`h₁` says that on a character of one byte, whose byte is `c.val.toUInt8`, the byte test `g`
+answers what the character test `f` answers; `h₂` says that on every byte from `0x80` up `g`
+answers what `f` answers on any character of more than one byte. The equation says
+`scanBytes s g`, started at the byte offset of `p`, ends at the byte offset of `scanWhile f p`.
+The induction follows `scanWhile`. A character that continues the run is passed over by
+`scanBytes_skip`, each of its bytes satisfying `g` by `h₁` if it is one byte and by `h₂` with
+`utf8EncodeChar_ge` otherwise. At a character that ends the run, its first byte fails `g` by the
+same two cases. At the end of the text both stop.
+-/
+private theorem scanBytes_eq (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) :
+    scanBytes s g p.offset.byteIdx = (scanWhile f p).offset.byteIdx := by
+  fun_induction scanWhile f p with
+  | case1 p c q hc hf ih =>
+    obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+    rw [← ih, String.Pos.byteIdx_offset_next]
+    apply scanBytes_skip s g
+    · have := String.Pos.offset_byteIdx_le_utf8ByteSize s (p.next hp)
+      rw [String.Pos.byteIdx_offset_next] at this
+      exact this
+    · intro k h hk
+      rw [byte_get hp hk h]
+      by_cases h1 : (p.get hp).utf8Size = 1
+      · obtain rfl : k = 0 := by omega
+        simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero]
+        rw [h₁ _ h1]
+        exact hf
+      · rw [h₂ _ h1 _ (utf8EncodeChar_ge h1 k _)]
+        exact hf
+  | case2 p c q hc hf =>
+    obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+    have hlt : p.offset.byteIdx < s.utf8ByteSize := by
+      have := String.Pos.offset_byteIdx_le_utf8ByteSize s (p.next hp)
+      rw [String.Pos.byteIdx_offset_next] at this
+      have := Char.utf8Size_pos (p.get hp)
+      omega
+    rw [scanBytes, dite_eq_left hlt, ite_eq_right]
+    have hb := byte_get hp (k := 0) (Char.utf8Size_pos _) (by simpa using hlt)
+    simp only [Nat.add_zero] at hb
+    rw [String.getUTF8Byte_eq_getElem, hb]
+    by_cases h1 : (p.get hp).utf8Size = 1
+    · simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero]
+      rw [h₁ _ h1]
+      simpa using hf
+    · rw [h₂ _ h1 _ (utf8EncodeChar_ge h1 0 _)]
+      simpa using hf
+  | case3 p hc =>
+    have hp : p = s.endPos := by
+      rw [step?] at hc
+      split at hc
+      · assumption
+      · simp at hc
+    subst hp
+    rw [scanBytes, dite_eq_right (by simp)]
+
+/--
+`scanWhile f`, computed by the byte scan `scanBytes s g`. The proof that the byte offset it
+reaches is a character boundary is `scanBytes_eq`, which is why `h₁` and `h₂` are arguments.
+-/
+@[inline]
+def scanBytesPos (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) : s.Pos :=
+  ⟨⟨scanBytes s g p.offset.byteIdx⟩, by
+    rw [scanBytes_eq g f h₁ h₂]; exact (scanWhile f p).isValid⟩
+
+/--
+The position the byte scan reaches is the end of the run. This is the form the `csimp` lemmas
+below need, an equation between positions rather than byte offsets.
+
+`scanBytesPos g f h₁ h₂ p` is the position at the byte offset `scanBytes` reaches, and
+`scanWhile f p` is the end of the run of characters satisfying `f`. Two positions are equal when
+their byte offsets are, and `scanBytes_eq` says these agree.
+-/
+private theorem scanBytesPos_eq (g : UInt8 → Bool) (f : Char → Bool)
+    (h₁ : ∀ c : Char, c.utf8Size = 1 → g c.val.toUInt8 = f c)
+    (h₂ : ∀ c : Char, c.utf8Size ≠ 1 → ∀ b : UInt8, 0x80 ≤ b → g b = f c) (p : s.Pos) :
+    scanBytesPos g f h₁ h₂ p = scanWhile f p :=
+  String.Pos.ext (String.Pos.Raw.ext (scanBytes_eq g f h₁ h₂ p))
+
+/--
+A character of one byte has that byte's value as its code point. Each byte test below is checked
+against its character test through this.
+
+`hc` says `c` takes one byte, which `Char.utf8Size_eq_one_iff` turns into `c.val ≤ 127`. The
+equation says the byte `c.val.toUInt8`, read as a number, is `c.toNat`; truncating to eight bits
+loses nothing below `0x80`.
+-/
+private theorem toNat_toUInt8 {c : Char} (hc : c.utf8Size = 1) :
+    c.val.toUInt8.toNat = c.toNat ∧ c.toNat < 0x80 := by
+  have h127 : c.toNat ≤ 127 := by
+    simpa [UInt32.le_iff_toNat_le] using Char.utf8Size_eq_one_iff.mp hc
+  refine ⟨?_, by omega⟩
+  rw [UInt32.toNat_toUInt8]
+  exact Nat.mod_eq_of_lt (show c.toNat < 2 ^ 8 by omega)
+
+/--
+A character of more than one byte is beyond ASCII, which is what decides both character tests
+for it.
+
+`hc` says `c` does not take one byte, so by `Char.utf8Size_eq_one_iff` its code point is above
+`127`, and `0x80 ≤ c.toNat` says exactly that.
+-/
+private theorem toNat_ge_of_utf8Size {c : Char} (hc : c.utf8Size ≠ 1) : 0x80 ≤ c.toNat := by
+  have : ¬ c.val ≤ 127 := fun h => hc (Char.utf8Size_eq_one_iff.mpr h)
+  simp only [UInt32.le_iff_toNat_le, UInt32.reduceToNat] at this
+  show 0x80 ≤ c.val.toNat
+  omega
+
+/-! ## Whitespace a run at a time -/
+
+/-- Where the whitespace starting at `p` ends. -/
+def wsEnd (p : s.Pos) : s.Pos := scanWhile Spec.isWs p
+
+/-- A byte that is whitespace, which only the one byte of a whitespace character can be. -/
+@[inline]
+def isWsByte (b : UInt8) : Bool := b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D
+
+/--
+For a character of one byte, the byte test for whitespace and the grammar's agree, which is the
+first condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes one byte, so `c.val.toUInt8` is that byte and has the value `c.toNat`.
+`isWsByte` asks for one of `0x20`, `0x09`, `0x0A` and `0x0D`, and `Spec.isWs c` for one of the
+four characters with those code points.
+-/
+theorem isWsByte_ascii (c : Char) (hc : c.utf8Size = 1) :
+    isWsByte c.val.toUInt8 = Spec.isWs c := by
+  have hn : c.toUInt8.toNat = c.toNat := (toNat_toUInt8 hc).1
+  rw [Bool.eq_iff_iff]
+  simp [isWsByte, Spec.isWs, ← UInt8.toNat_inj, ← Char.toNat_inj, hn]
+
+/--
+No byte from `0x80` up is whitespace, and no character beyond ASCII is, which is the second
+condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes more than one byte, so its code point is at least `0x80`, and `hb` says the
+byte `b` is at least `0x80`. Both tests answer `false`, since the four whitespace characters are
+all below `0x80`.
+-/
+theorem isWsByte_high (c : Char) (hc : c.utf8Size ≠ 1) (b : UInt8) (hb : 0x80 ≤ b) :
+    isWsByte b = Spec.isWs c := by
+  have hn := toNat_ge_of_utf8Size hc
+  simp only [UInt8.le_iff_toNat_le, UInt8.reduceToNat] at hb
+  rw [Bool.eq_iff_iff]
+  simp [isWsByte, Spec.isWs, ← UInt8.toNat_inj, ← Char.toNat_inj]
+  omega
+
+def wsEndFast (p : s.Pos) : s.Pos := scanBytesPos isWsByte Spec.isWs isWsByte_ascii isWsByte_high p
+
+/--
+The compiler is told to find the end of whitespace a byte at a time. Every proof speaks of
+`wsEnd`, a character at a time, and what runs is the byte scan.
+
+The equation `@wsEnd = @wsEndFast` is between the functions, over every text and position, as
+`@[csimp]` requires. `wsEndFast` is `scanBytesPos` with the whitespace tests, which
+`scanBytesPos_eq` equates with `scanWhile Spec.isWs`, the definition of `wsEnd`.
+-/
+@[csimp] theorem wsEnd_eq_wsEndFast : @wsEnd = @wsEndFast := by
+  funext s p
+  exact (scanBytesPos_eq _ _ _ _ p).symm
+
+/--
+`skipWs`, with the record built where it is used. `skipWs` returns its record from a loop, which
+in compiled code is an allocation on every call, however little whitespace there was.
+-/
+@[inline]
+def skipWsFast (start : s.Pos) : Consumed Unit start := ⟨(), wsEnd start, scanWhile_le _ start⟩
+
+/--
+The whitespace loop stops where the run of whitespace from its position ends. This is the form
+general enough to be an induction hypothesis, with the loop's position free.
+
+`(skipWs.go start p h).pos` is where the loop called at `p` stops, and `scanWhile Spec.isWs p` is
+the end of the run of whitespace from `p`. The induction follows `skipWs.go`, whose three cases
+are a whitespace character, any other character and the end of the text; `scanWhile_step` handles
+the first and `scanWhile_stop` the other two.
+-/
+private theorem skipWs_go_pos (start p : s.Pos) (h : p.remainingBytes ≤ start.remainingBytes) :
+    (skipWs.go start p h).pos = scanWhile Spec.isWs p := by
+  fun_induction skipWs.go start p h with
+  | case1 p h c q hc hw ih => rw [ih, scanWhile_step hc hw]
+  | case2 p h c q hc hw =>
+    refine (scanWhile_stop fun c' q' hc' => ?_).symm
+    rw [hc] at hc'
+    injection hc' with hc''
+    injection hc'' with h₁
+    rw [← h₁]
+    simpa using hw
+  | case3 p h hc =>
+    refine (scanWhile_stop fun c' q' hc' => ?_).symm
+    rw [hc] at hc'
+    exact absurd hc' (by simp)
+
+/--
+The compiler is told to run `skipWsFast` in place of `skipWs`, so that skipping whitespace,
+which the machine does around every token, costs no allocation. Every proof speaks of `skipWs`.
+
+The equation `@skipWs = @skipWsFast` is between the functions, over every text and position, as
+`@[csimp]` requires. A `Consumed Unit start` is determined by its position, its value being `()`
+and its bound a proof, and `skipWs_go_pos` says the two positions agree.
+-/
+@[csimp] theorem skipWs_eq_skipWsFast : @skipWs = @skipWsFast := by
+  funext s start
+  have hpos := skipWs_go_pos start start (Nat.le_refl _)
+  unfold skipWs skipWsFast wsEnd
+  generalize skipWs.go start start (Nat.le_refl _) = r at hpos
+  obtain ⟨⟨⟩, w, hw⟩ := r
+  simp only at hpos
+  subst hpos
+  rfl
+
+/-! ## Strings a run at a time -/
+
+/-!
+`string` appends one character at a time, which in compiled code is an allocation and a push for
+each one. A run of unescaped characters stands for itself, so `stringFast` copies each run whole
+and goes through `stringStep` only where a run ends. The two are proved equal, so `string` is
+what the proofs speak of and `stringFast` is what runs.
+-/
+
+/--
+An unescaped character is read as itself. It is the commonest case by far, and the only one that
+consumes a single character.
+
+`hs` says `c` is the character at `p` and `hu` says it satisfies `isUnescaped`. The conclusion
+`stringStep p = .char c q` fixes the machine's answer exactly. The earlier branches, which test
+for `'"'` and `'\\'`, are excluded because `isUnescaped` holds of neither.
+-/
+theorem stringStep_unescaped {p q : s.Pos} {c : Char} (hs : step? p = some (c, q))
+    (hu : Spec.isUnescaped c = true) : stringStep p = .char c q := by
+  rw [stringStep]
+  split
+  · next hc => rw [hs] at hc; exact absurd hc (by simp)
+  · next w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc
+    rw [hcc] at hu
+    exact absurd hu (by decide)
+  · next w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc
+    rw [hcc] at hu
+    exact absurd hu (by decide)
+  · next c' w hc =>
+    rw [hs] at hc
+    injection hc with hc'
+    injection hc' with hcc hww
+    subst hcc
+    subst hww
+    rw [ite_eq_left hu]
+
+/-- Where the run of unescaped characters that starts at `p` ends. -/
+def unescapedEnd (p : s.Pos) : s.Pos := scanWhile Spec.isUnescaped p
+
+/-- A byte that cannot end a run of unescaped characters. -/
+@[inline]
+def continuesRun (b : UInt8) : Bool := 0x20 ≤ b && b != 0x22 && b != 0x5C
+
+/--
+For a character of one byte, the byte test for continuing a run and the grammar's test for an
+unescaped character agree, which is the first condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes one byte, so `c.val.toUInt8` is that byte and has the value `c.toNat`, below
+`0x80`. `continuesRun` asks for at least `0x20` and neither `0x22` nor `0x5C`;
+`Spec.isUnescaped c` asks for `0x20` to `0x21`, `0x23` to `0x5B`, or at least `0x5D`. Below
+`0x80` those are the same numbers.
+-/
+theorem continuesRun_ascii (c : Char) (hc : c.utf8Size = 1) :
+    continuesRun c.val.toUInt8 = Spec.isUnescaped c := by
+  have hn : c.toUInt8.toNat = c.toNat := (toNat_toUInt8 hc).1
+  rw [Bool.eq_iff_iff]
+  simp [continuesRun, Spec.isUnescaped, UInt8.le_iff_toNat_le, ← UInt8.toNat_inj, hn]
+  omega
+
+/--
+Every byte from `0x80` up continues a run, and every character beyond ASCII is unescaped, which
+is the second condition `scanBytes_eq` asks of a byte test.
+
+`hc` says `c` takes more than one byte, so its code point is at least `0x80` and above `0x5D`, and
+`hb` says the byte `b` is at least `0x80`, so neither below `0x20` nor `0x22` nor `0x5C`. Both
+tests answer `true`.
+-/
+theorem continuesRun_high (c : Char) (hc : c.utf8Size ≠ 1) (b : UInt8) (hb : 0x80 ≤ b) :
+    continuesRun b = Spec.isUnescaped c := by
+  have hn := toNat_ge_of_utf8Size hc
+  simp only [UInt8.le_iff_toNat_le, UInt8.reduceToNat] at hb
+  rw [Bool.eq_iff_iff]
+  simp [continuesRun, Spec.isUnescaped, UInt8.le_iff_toNat_le, ← UInt8.toNat_inj]
+  omega
+
+def unescapedEndFast (p : s.Pos) : s.Pos :=
+  scanBytesPos continuesRun Spec.isUnescaped continuesRun_ascii continuesRun_high p
+
+/--
+The compiler is told to find the end of a run of unescaped characters a byte at a time.
+`stringFast` is written with `unescapedEnd`, and so is every proof about it; this makes what runs
+the byte scan.
+
+The equation `@unescapedEnd = @unescapedEndFast` is between the functions, over every text and
+position, as `@[csimp]` requires. `unescapedEndFast` is `scanBytesPos` with the tests for
+unescaped characters, which `scanBytesPos_eq` equates with `scanWhile Spec.isUnescaped`, the
+definition of `unescapedEnd`.
+-/
+@[csimp] theorem unescapedEnd_eq_unescapedEndFast : @unescapedEnd = @unescapedEndFast := by
+  funext s p
+  exact (scanBytesPos_eq _ _ _ _ p).symm
+
+/-- `acc` followed by the text from `p` to `q`, which is that text itself when `acc` is empty. -/
+def appendRun (acc : String) (p q : s.Pos) : String :=
+  if acc.isEmpty then s.extract p q else acc ++ s.extract p q
+
+/--
+Leaving out the empty accumulator changes nothing. It saves a copy on the commonest string of
+all, one with no escape, whose whole content is a single run appended to `""`.
+
+`appendRun acc p q` is the text from `p` to `q` when `acc` is empty and `acc` followed by it
+otherwise; `acc ++ s.extract p q` is the latter in every case. The two agree because `"" ++ t` is
+`t`.
+-/
+private theorem appendRun_eq (acc : String) (p q : s.Pos) :
+    appendRun acc p q = acc ++ s.extract p q := by
+  unfold appendRun
+  split
+  · next h => rw [String.isEmpty_iff.mp h, String.empty_append]
+  · rfl
+
+/--
+Pushing a run's first character and then copying the rest of the run is copying the whole run.
+This is the step that lets one copy stand for a push per character.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hq` says the run's end
+`e` is not before `q`. The equation says `acc.push c` followed by the text from `q` to `e` is
+`acc` followed by the text from `p` to `e`. `String.copy_slice_eq_append_of_lt` splits the latter
+text into its first character and the rest, and `String.append_singleton` identifies appending
+that character with pushing it.
+-/
+private theorem push_append_extract {p q e : s.Pos} {c : Char} (hc : step? p = some (c, q))
+    (hq : q ≤ e) (acc : String) : acc.push c ++ s.extract q e = acc ++ s.extract p e := by
+  obtain ⟨hp, rfl, rfl⟩ := step?_eq_some hc
+  have hlt : p < e := String.Pos.lt_of_lt_of_le String.Pos.lt_next hq
+  rw [String.extract_eq_copy_slice _ _ hq,
+    String.extract_eq_copy_slice _ _ (String.Pos.le_of_lt hlt),
+    String.copy_slice_eq_append_of_lt hlt, ← String.append_singleton, String.append_assoc]
+
+/--
+The string loop called at the same position with the same accumulator gives the same result,
+whatever proof of its bound it carries. The loop's results are compared at positions computed in
+two ways, so they have to be matched up to an equation rather than syntactically.
+
+`hp` and `hacc` say the positions and the accumulators are equal; `h` and `h'` are the bounds
+each call carries. Once the equations are substituted, the bounds are proofs of one proposition,
+and so are the same.
+-/
+private theorem string_go_congr {start p p' : s.Pos} {acc acc' : String} (hp : p = p')
+    (hacc : acc = acc') (h : p.remainingBytes ≤ start.remainingBytes)
+    (h' : p'.remainingBytes ≤ start.remainingBytes) :
+    string.go start p acc h = string.go start p' acc' h' := by
+  subst hp
+  subst hacc
+  rfl
+
+/--
+One turn of the string loop on an unescaped character pushes it and carries on from the next
+position. This is the unfolding of `string.go` that a run is made of, stated as an equation
+because the loop's bound argument keeps `rw` from unfolding it in place.
+
+`hc` says `c` is the character at `p` and `q` the position after it, and `hu` says it is
+unescaped. The equation relates the loop at `p` with accumulator `acc` to the loop at `q` with
+`acc.push c`; `h` and `h'` are their bounds. `stringStep_unescaped` fixes what the loop's one
+`stringStep` returns, which rules out its other two branches.
+-/
+private theorem string_go_unescaped {start p q : s.Pos} {c : Char} (hc : step? p = some (c, q))
+    (hu : Spec.isUnescaped c = true) (acc : String) (h : p.remainingBytes ≤ start.remainingBytes)
+    (h' : q.remainingBytes ≤ start.remainingBytes) :
+    string.go start p acc h = string.go start q (acc.push c) h' := by
+  rw [string.go]
+  split
+  · next e hs => rw [stringStep_unescaped hc hu] at hs; simp at hs
+  · next r hs => rw [stringStep_unescaped hc hu] at hs; simp at hs
+  · next c' r hs =>
+    rw [stringStep_unescaped hc hu] at hs
+    injection hs with h₁ h₂
+    subst h₁
+    subst h₂
+    rfl
+
+/--
+The string loop passes over a run of unescaped characters as one copy of the run. This is the
+whole difference between `string` and `stringFast`, which otherwise take the same steps.
+
+`string.go start p acc h` is the loop at `p` holding `acc`. The equation says it equals the loop
+at `scanWhile Spec.isUnescaped p`, the end of the run, holding `acc` followed by the run's text;
+`h'` is that call's bound. The induction follows `scanWhile`: where the run stops at once the
+text is empty, and where it continues `string_go_unescaped` takes one character and
+`push_append_extract` moves it into the copy.
+-/
+private theorem string_go_run (start p : s.Pos) :
+    ∀ (acc : String) (h : p.remainingBytes ≤ start.remainingBytes)
+      (h' : (scanWhile Spec.isUnescaped p).remainingBytes ≤ start.remainingBytes),
+      string.go start p acc h =
+        string.go start (scanWhile Spec.isUnescaped p)
+          (acc ++ s.extract p (scanWhile Spec.isUnescaped p)) h' := by
+  fun_induction scanWhile Spec.isUnescaped p with
+  | case1 p c q hc hu ih =>
+    intro acc h h'
+    have hq : q.remainingBytes ≤ start.remainingBytes := by have := step?_lt hc; omega
+    rw [string_go_unescaped hc hu acc h hq, ih (acc.push c) hq h']
+    exact string_go_congr rfl (push_append_extract hc (le_scanWhile _ q) acc) _ _
+  | case2 | case3 =>
+    intro acc h h'
+    rw [String.extract_eq_copy_slice _ _ (String.Pos.le_refl _), String.copy_slice_self,
+      String.append_empty]
+
+/--
+Whether the byte at `e` is a quotation mark. Only a whole character can be, so this is how the
+end of a string is recognised without decoding it.
+-/
+@[inline]
+def quoteAt (e : s.Pos) : Bool :=
+  if h : e.offset.byteIdx < s.utf8ByteSize then s.getUTF8Byte e.offset h == 0x22 else false
+
+/--
+A quotation mark found at `e` is a character, so `e` is not the end of the text. The closing
+quotation mark is passed with `String.Pos.next`, which needs this.
+
+`h : quoteAt e = true` says the byte at `e` is `0x22`, and `e ≠ s.endPos` says `e` is not the
+end. At the end there is no byte, and `quoteAt` answers `false`.
+-/
+theorem quoteAt_ne {e : s.Pos} (h : quoteAt e = true) : e ≠ s.endPos := by
+  intro he
+  subst he
+  simp [quoteAt] at h
+
+/--
+A quotation mark byte is the closing quotation mark as `stringStep` reads it. This is what lets
+`stringFast` end a string on the byte alone.
+
+`h` says the byte at `e` is `0x22`. The conclusion is that `stringStep e` reports the end of the
+string, with the position just past `e`. The byte is the first of the character at `e` by
+`byte_get`; a character of more than one byte starts with a byte of at least `0x80` by
+`utf8EncodeChar_ge`, so this one is a single byte with code point `0x22`, which is `'"'`, and
+`stringStep` reads that as the end.
+-/
+private theorem stringStep_quoteAt {e : s.Pos} (h : quoteAt e = true) :
+    stringStep e = .done (e.next (quoteAt_ne h)) := by
+  have hp := quoteAt_ne h
+  have hlt : e.offset.byteIdx < s.utf8ByteSize := by
+    unfold quoteAt at h
+    split at h
+    · assumption
+    · simp at h
+  have hbyte : s.toByteArray[e.offset.byteIdx]'(by simpa using hlt) = 0x22 := by
+    unfold quoteAt at h
+    rw [dite_eq_left hlt] at h
+    simpa [String.getUTF8Byte_eq_getElem] using h
+  have hb := byte_get hp (k := 0) (Char.utf8Size_pos _) (by simpa using hlt)
+  simp only [Nat.add_zero] at hb
+  rw [hb] at hbyte
+  have h1 : (e.get hp).utf8Size = 1 := by
+    apply Classical.byContradiction
+    intro h1
+    have := utf8EncodeChar_ge h1 0 (by simp [Char.utf8Size_pos])
+    rw [hbyte] at this
+    exact absurd this (by decide)
+  simp only [String.utf8EncodeChar_eq_singleton h1, List.getElem_cons_zero] at hbyte
+  have hc : e.get hp = '"' := by
+    rw [← Char.toNat_inj]
+    have := (toNat_toUInt8 h1).1
+    rw [hbyte] at this
+    simpa using this.symm
+  have hs : step? e = some ('"', e.next hp) := by rw [step?, dite_eq_right hp, hc]
+  rw [stringStep, hs]
+  rfl
+
+def stringFast (start : s.Pos) (acc : String) : Except Error (Scanned String start) :=
+  go start acc (Nat.le_refl _)
+where
+  go (p : s.Pos) (acc : String) (h : p.remainingBytes ≤ start.remainingBytes) :
+      Except Error (Scanned String start) :=
+    if hq : quoteAt (unescapedEnd p) then
+      .ok ⟨appendRun acc p (unescapedEnd p), (unescapedEnd p).next (quoteAt_ne hq), by
+        have := (String.Pos.lt_iff_remainingBytes_lt _ _).mp
+          (String.Pos.lt_next (h := quoteAt_ne hq))
+        have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+        omega⟩
+    else
+      match hs : stringStep (unescapedEnd p) with
+      | .fail e => .error e
+      | .done q =>
+        .ok ⟨appendRun acc p (unescapedEnd p), q, by
+          have := stringStep_done_lt _ q hs
+          have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+          omega⟩
+      | .char c q =>
+        go q ((appendRun acc p (unescapedEnd p)).push c) (by
+          have := stringStep_char_lt _ c q hs
+          have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+          omega)
+  termination_by p.remainingBytes
+  decreasing_by
+    have := stringStep_char_lt _ c q hs
+    have : (unescapedEnd p).remainingBytes ≤ p.remainingBytes := scanWhile_le _ p
+    omega
+
+/--
+The run-copying loop and the character loop agree at every position and accumulator, which is
+the form general enough to be an induction hypothesis.
+
+`stringFast.go start p acc h` and `string.go start p acc h` are the two loops at `p` holding
+`acc`, with the same bound `h`. The induction follows `stringFast.go`, whose three cases are what
+`stringStep` reports at the end of the run. In each, `string_go_run` carries `string.go` to the
+same place with the run appended, after which both loops take the same branch; `appendRun_eq`
+identifies their accumulators.
+-/
+private theorem stringFast_go_eq (start p : s.Pos) (acc : String)
+    (h : p.remainingBytes ≤ start.remainingBytes) :
+    stringFast.go start p acc h = string.go start p acc h := by
+  have hrun := fun p acc (h : p.remainingBytes ≤ start.remainingBytes) =>
+    string_go_run start p acc h (Nat.le_trans (scanWhile_le _ p) h)
+  fun_induction stringFast.go start p acc h with
+  | case1 p acc h hq =>
+    rw [hrun, string.go]
+    have hs := stringStep_quoteAt hq
+    simp only [unescapedEnd] at hs
+    split
+    · next e hs' => rw [hs] at hs'; simp at hs'
+    · next r hs' =>
+      rw [hs] at hs'
+      injection hs' with hh
+      subst hh
+      simp only [appendRun_eq, unescapedEnd]
+    · next c r hs' => rw [hs] at hs'; simp at hs'
+  | case2 p acc h hq err hs =>
+    rw [hrun, string.go]
+    split
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; injection hs' with hh; subst hh; rfl
+    · next r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+  | case3 p acc h hq q hs =>
+    rw [hrun, string.go]
+    split
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next r hs' =>
+      rw [unescapedEnd] at hs
+      rw [hs] at hs'
+      injection hs' with hh
+      subst hh
+      simp only [appendRun_eq, unescapedEnd]
+    · next c r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+  | case4 p acc h hq c q hs ih =>
+    rw [hrun, string.go]
+    split
+    · next e hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next r hs' => rw [unescapedEnd] at hs; rw [hs] at hs'; simp at hs'
+    · next c' r hs' =>
+      rw [unescapedEnd] at hs
+      rw [hs] at hs'
+      injection hs' with h₁ h₂
+      subst h₁
+      subst h₂
+      rw [ih]
+      exact string_go_congr rfl (by rw [appendRun_eq, unescapedEnd]) _ _
+
+/--
+The compiler is told to read strings a run at a time in place of a character at a time.
+Everything proved about strings speaks of `string`, everything executed is `stringFast`, and this
+is what makes those the same program.
+
+The equation `@string = @stringFast` is between the functions themselves, over every text,
+starting position and accumulator, which is what `@[csimp]` requires before it will substitute
+one for the other in compiled code. It is `stringFast_go_eq` at the loop's entry, where both
+start at `start` with the given accumulator.
+-/
+@[csimp] theorem string_eq_stringFast : @string = @stringFast := by
+  funext s start acc
+  exact (stringFast_go_eq start start acc _).symm
+
 /-! ## Numbers -/
 
 /-- `*DIGIT`, accumulating the most significant digit first, and as a loop for the same reason. -/
@@ -502,9 +1372,40 @@ def digitList (start p : s.Pos) (acc : List Nat)
 termination_by p.remainingBytes
 decreasing_by exact step?_lt hc
 
+/-- At most `k` more digits, folded in as `digits.go` folds them. -/
+def digitsUpTo (start p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes) :
+    Nat → Consumed (Nat × Nat) start
+  | 0 => ⟨(v, n), p, h⟩
+  | k + 1 =>
+    match hc : step? p with
+    | some (c, q) =>
+      if Spec.isDigit c then
+        digitsUpTo start q (v * 10 + Spec.digitVal c) (n + 1) (by have := step?_lt hc; omega) k
+      else
+        ⟨(v, n), p, h⟩
+    | none => ⟨(v, n), p, h⟩
+
+/--
+How many digits after the first are read by folding before the rest of a run is handed to the
+halving reader. Every number a parse sees starts with one digit already read, so a run of up to
+eighteen is folded into a value below `2 ^ 63`, which on a 64-bit platform needs no allocation,
+and only longer runs pay for building a list. It is a literal because the compiler folds a literal
+into its uses but computes a formula once at startup and checks for it at every use;
+`foldedDigits_bound` checks the formula instead.
+-/
+def foldedDigits : Nat := 17
+
+/-- The most digits that stay below `2 ^ 63` when folded: one more would not. -/
+theorem foldedDigits_bound :
+    10 ^ (foldedDigits + 1) ≤ 2 ^ 63 ∧ 2 ^ 63 < 10 ^ (foldedDigits + 2) := by
+  decide
+
 def digitsFast (start : s.Pos) (value count : Nat) : Consumed (Nat × Nat) start :=
-  match digitList start start [] (Nat.le_refl _) with
-  | ⟨ds, pos, h⟩ => ⟨digitJoin (value, count) (fromDigits ds.reverse), pos, h⟩
+  let r := digitsUpTo start start value count (Nat.le_refl _) foldedDigits
+  if r.value.2 < count + foldedDigits then r
+  else
+    let l := digitList start r.pos [] r.notLonger
+    ⟨digitJoin r.value (fromDigits l.value.reverse), l.pos, l.notLonger⟩
 
 /--
 One turn of the digit loop reads one digit and carries on from the next position. `digits.go`
@@ -601,23 +1502,86 @@ private theorem digits_go_eq (start : s.Pos) (v c : Nat) :
     exact absurd hcq (by simp)
 
 /--
+Folding up to `k` digits and then carrying on with the loop is the loop: `digitsUpTo` runs the
+same steps as `digits.go`, so the loop resumed where it stopped ends where the loop alone would.
+-/
+private theorem digits_go_upTo (start : s.Pos) :
+    ∀ (k : Nat) (p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes),
+      digits.go start p v n h =
+        digits.go start (digitsUpTo start p v n h k).pos (digitsUpTo start p v n h k).value.1
+          (digitsUpTo start p v n h k).value.2 (digitsUpTo start p v n h k).notLonger := by
+  intro k
+  induction k with
+  | zero => intro p v n h; rfl
+  | succ k ih =>
+    intro p v n h
+    rw [digitsUpTo]
+    split
+    · next c q hc =>
+      split
+      · next hd =>
+        rw [digits_go_step hc hd v n h (by have := step?_lt hc; omega)]
+        exact ih _ _ _ _
+      · rfl
+    · rfl
+
+/--
+When `digitsUpTo` returns before using up its `k` digits, it stopped where the digits do: what
+follows, if anything, is not a digit, so the loop has nothing more to read there.
+-/
+private theorem digitsUpTo_stop (start : s.Pos) :
+    ∀ (k : Nat) (p : s.Pos) (v n : Nat) (h : p.remainingBytes ≤ start.remainingBytes),
+      (digitsUpTo start p v n h k).value.2 < n + k →
+      ∀ c q, step? (digitsUpTo start p v n h k).pos = some (c, q) → Spec.isDigit c = false := by
+  intro k
+  induction k with
+  | zero => intro p v n h hlt; simp [digitsUpTo] at hlt
+  | succ k ih =>
+    intro p v n h
+    rw [digitsUpTo]
+    split
+    · next c' q' hc =>
+      split
+      · next hd => intro hlt; exact ih _ _ _ _ (by omega)
+      · next hd =>
+        intro _ c q hcq
+        rw [hc] at hcq
+        injection hcq with hcq'
+        injection hcq' with hcc _
+        rw [← hcc]
+        simpa using hd
+    · next hc =>
+      intro _ c q hcq
+      rw [hc] at hcq
+      exact absurd hcq (by simp)
+
+/--
 The two digit readers agree from a fresh start, which is the instance that matters: it is what
 lets the fast one replace the one every proof about numbers is written against. `digitsFast` is
 where reading a long number stopped costing time quadratic in its digits.
 
-`digitsFast start value count` collects the digits into a list and reads them by repeated halving;
-`digits start value count` folds them one at a time. Equality is of the whole `Consumed` record,
-so the value, the digit count and the stopping position all agree, and the two are interchangeable
-wherever either appears. It is `digits_go_eq` at the empty accumulator, where
-`digitJoin (value, count) (fromDigits [])` collapses to `(value, count)`.
+`digitsFast start value count` folds up to `foldedDigits` digits, then collects any that remain
+into a list and reads them by repeated halving; `digits start value count` folds them all one at a
+time. Equality is of the whole `Consumed` record, so the value, the digit count and the stopping
+position all agree, and the two are interchangeable wherever either appears. A run that ends
+early is `digits_go_stop` where the folding stopped; a longer one is `digits_go_eq` from there, at
+the empty accumulator, where `digitJoin (v, c) (fromDigits [])` collapses to `(v, c)`.
 -/
 theorem digitsFast_eq (start : s.Pos) (value count : Nat) :
     digitsFast start value count = digits start value count := by
-  have hgo := digits_go_eq start value count start [] (Nat.le_refl _)
-  rw [show digitJoin (value, count) (fromDigits ([] : List Nat).reverse) = (value, count) from by
-    simp [digitJoin, fromDigits]] at hgo
-  rw [digits, digitsFast]
-  exact hgo.symm
+  rw [digits, digits_go_upTo start foldedDigits]
+  unfold digitsFast
+  simp only
+  split
+  · next hlt => rw [digits_go_stop _ _ _ (digitsUpTo_stop start foldedDigits _ _ _ _ hlt)]
+  · have hgo := digits_go_eq start
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).value.1
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).value.2
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).pos []
+      (digitsUpTo start start value count (Nat.le_refl _) foldedDigits).notLonger
+    rw [show ∀ v c, digitJoin (v, c) (fromDigits ([] : List Nat).reverse) = (v, c) from by
+      simp [digitJoin, fromDigits]] at hgo
+    exact hgo.symm
 
 /--
 The compiler is told to run the fast reader in place of the one the library is stated in terms of.
