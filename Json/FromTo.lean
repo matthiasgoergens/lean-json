@@ -454,6 +454,191 @@ theorem list_roundTrip {α : Type} [ToJson α] [FromJson α]
   rw [array_roundTrip h l.toArray]
   rfl
 
+/-! ## Lawful codecs
+
+`LawfulJson α` says that `α`'s codec round trips for every value, so a proof about a type built
+from others can ask for it of its parts. `Nat` and `Int` have no instance, their round trip failing
+for a number with more than a thousand trailing zeros (`nat_roundTrip`); nor do `Float`, whose NaN
+does not come back as the same bits, `String.Slice`, which comes back as a slice of a new string,
+`Std.TreeMap`, which is rebuilt by insertion and so not necessarily into the same tree, and
+`USize` and `UInt64`, for which the proof is not written. `Option α` has one when `α`'s encoding
+is never `null`, which `NonNullJson` records.
+-/
+
+/-- Decoding the encoding of any value gives back that value. -/
+class LawfulJson (α : Type u) [ToJson α] [FromJson α] : Prop where
+  fromJson?_toJson : ∀ x : α, (fromJson? (toJson x) : Except String α) = .ok x
+
+/--
+Two values with the same encoding are the same value. It is what a lawful codec buys a caller
+beyond reading back: the encoding can stand in for the value as a key, a cache entry or a test
+expectation without two values being confused.
+
+`toJson a = toJson b` says the encodings are equal as `Json` trees, not merely as text, and the
+conclusion `a = b` is equality in `α`. Decoding both sides of the hypothesis gives `.ok a` and
+`.ok b` by `fromJson?_toJson`, and `Except.ok` is injective.
+-/
+theorem LawfulJson.toJson_injective [ToJson α] [FromJson α] [LawfulJson α] {a b : α}
+    (h : toJson a = toJson b) : a = b := by
+  have := LawfulJson.fromJson?_toJson (α := α) a
+  rw [h, LawfulJson.fromJson?_toJson] at this
+  exact Except.ok.inj this |>.symm
+
+/-- No value is encoded as `null`, which is what lets `Option α` round trip. -/
+class NonNullJson (α : Type u) [ToJson α] : Prop where
+  toJson_ne_null : ∀ x : α, toJson x ≠ null
+
+instance : LawfulJson Json := ⟨json_roundTrip⟩
+instance : LawfulJson Number := ⟨number_roundTrip⟩
+instance : LawfulJson Bool := ⟨bool_roundTrip⟩
+instance : LawfulJson String := ⟨string_roundTrip⟩
+instance : LawfulJson Unit := ⟨fun () => unit_roundTrip⟩
+instance : LawfulJson Empty := ⟨nofun⟩
+instance : LawfulJson System.FilePath := ⟨fun _ => rfl⟩
+instance : LawfulJson Structured := ⟨fun | .arr _ => rfl | .obj _ => rfl⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] : LawfulJson (Array α) :=
+  ⟨array_roundTrip LawfulJson.fromJson?_toJson⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] : LawfulJson (List α) :=
+  ⟨list_roundTrip LawfulJson.fromJson?_toJson⟩
+
+instance {α β : Type} [ToJson α] [FromJson α] [LawfulJson α] [ToJson β] [FromJson β]
+    [LawfulJson β] : LawfulJson (α × β) :=
+  ⟨prod_roundTrip LawfulJson.fromJson?_toJson LawfulJson.fromJson?_toJson⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] [NonNullJson α] :
+    LawfulJson (Option α) :=
+  ⟨fun
+    | none => option_none_roundTrip
+    | some a =>
+      option_some_roundTrip LawfulJson.fromJson?_toJson a (NonNullJson.toJson_ne_null a)⟩
+
+instance : NonNullJson Number := ⟨fun _ => nofun⟩
+instance : NonNullJson Bool := ⟨fun _ => nofun⟩
+instance : NonNullJson String := ⟨fun _ => nofun⟩
+instance : NonNullJson Unit := ⟨fun _ => nofun⟩
+instance : NonNullJson Empty := ⟨nofun⟩
+instance : NonNullJson System.FilePath := ⟨fun _ => nofun⟩
+instance : NonNullJson Structured := ⟨fun | .arr _ => nofun | .obj _ => nofun⟩
+instance [ToJson α] : NonNullJson (Array α) := ⟨fun _ => nofun⟩
+instance [ToJson α] : NonNullJson (List α) := ⟨fun _ => nofun⟩
+instance [ToJson α] [ToJson β] : NonNullJson (α × β) := ⟨fun _ => nofun⟩
+
+/-! ## What a derived codec's proofs need
+
+A derived encoder builds an object as `mkObj (List.flatten parts)`, one part per field: a single
+pair, or `opt k v` for an optional field. Its decoder looks each key up with `getObjValD`. These
+say what that lookup finds, given that no other part carries the key, which the handler checks
+before it generates anything and the generated proof shows one pair of keys at a time.
+-/
+
+/--
+A field's part does not carry another field's key. A derived codec's proof needs this of every
+pair of fields, so it is stated for one part and one other key at a time, leaving only the
+inequality of two string literals to check.
+
+`k ∉ [(k', v)].map Prod.fst` says the part, the single pair under `k'`, has no pair under `k`.
+`h : k ≠ k'` is all it needs, the value playing no part.
+-/
+theorem not_mem_keys_single {k k' : String} {v : Json} (h : k ≠ k') :
+    k ∉ [(k', v)].map Prod.fst := by
+  simpa using h
+
+/--
+An optional field's part does not carry another field's key, whether or not the field is present.
+It is the counterpart of `not_mem_keys_single` for a part that may be empty.
+
+`k ∉ (opt k' o).map Prod.fst` says the part has no pair under `k`. When `o` is `none` the part is
+empty, and when it is `some v` it is the single pair under `k'`, so `h : k ≠ k'` covers both.
+-/
+theorem not_mem_keys_opt [ToJson α] {k k' : String} {o : Option α} (h : k ≠ k') :
+    k ∉ (opt k' o).map Prod.fst := by
+  cases o with
+  | none => simp [opt]
+  | some _ => simpa [opt] using h
+
+/--
+Looking up a field's key in an object built from parts finds the value its own part put there,
+whatever comes before it, as long as nothing after it carries the same key. It is the step
+`getObjValD_mkObj_get` takes once the parts are split around the field's.
+
+`pre` and `post` are the parts before and after the field's, `[(k, v)]`. `hpost` says no part in
+`post` has a pair under `k`; nothing is asked of `pre`, lookup taking the last field of a name. The
+conclusion is that `getObjValD` answers `v` itself, not the `null` it gives for a missing key.
+-/
+private theorem getObjValD_mkObj_field {pre post : List (List (String × Json))} {k : String}
+    {v : Json} (hpost : ∀ p ∈ post, k ∉ p.map Prod.fst) :
+    (mkObj (List.flatten (pre ++ [(k, v)] :: post))).getObjValD k = v := by
+  have hnone : findLast? (List.flatten post).toArray k = none := by
+    rw [findLast?_eq_none_iff]
+    simpa [fieldNames, List.mem_flatten] using hpost
+  simp only [mkObj, getObjValD, getObjVal?, List.flatten_append, List.flatten_cons,
+    ← List.append_assoc, ← List.append_toArray, findLast?_append, hnone, Option.none_or]
+  simp [findLast?]
+  rfl
+
+/--
+A list with an element at `i` is what comes before it, the element, and what comes after. It is
+what lets a lookup be stated by position, the parts before and after being read off the list
+rather than written out again.
+
+`h : l[i]? = some p` says `p` is at `i`, which also puts `i` in bounds. The conclusion splits `l`
+into `l.take i`, `p` and `l.drop (i + 1)`, so nothing is lost or repeated at the seams.
+-/
+private theorem eq_take_cons_drop {l : List α} {i : Nat} {p : α} (h : l[i]? = some p) :
+    l = l.take i ++ p :: l.drop (i + 1) := by
+  obtain ⟨hi, rfl⟩ := List.getElem?_eq_some_iff.1 h
+  rw [← List.drop_eq_getElem_cons hi, List.take_append_drop]
+
+/--
+Looking up a field's key in an object built from parts finds the value its own part put there, as
+long as no later part carries the same key. It is how a proof that a derived decoder reads back its
+encoder's output finds each field, the parts being those of the encoder and `i` the field's place.
+
+`hi : parts[i]? = some [(k, v)]` says the field's part is the single pair under `k`. `hpost` says no
+part after it has a pair under `k`; nothing is asked of the parts before, lookup taking the last
+field of a name. The conclusion is that `getObjValD` answers `v` itself, not the `null` it gives
+for a missing key.
+-/
+theorem getObjValD_mkObj_get {parts : List (List (String × Json))} {i : Nat} {k : String}
+    {v : Json} (hi : parts[i]? = some [(k, v)])
+    (hpost : ∀ p ∈ parts.drop (i + 1), k ∉ p.map Prod.fst) :
+    (mkObj parts.flatten).getObjValD k = v := by
+  rw [eq_take_cons_drop hi]
+  exact getObjValD_mkObj_field hpost
+
+/--
+Looking up an optional field's key in an object built from parts finds the encoding of the field,
+`null` when it is absent and the value's encoding when present, as long as no other part carries
+the key. It is what lets a derived decoder read an optional field back through `Option`'s decoder
+whether or not the encoder wrote it.
+
+`hi : parts[i]? = some (opt k o)` says the field's part is the optional one under `k`. `hpre` and
+`hpost` say no part before or after it has a pair under `k`; both are needed, since an absent field
+leaves lookup to fall through to the others. The conclusion is `toJson o`, which is `null` for
+`none` and `toJson v` for `some v`, the two answers the lookup gives.
+-/
+theorem getObjValD_mkObj_get_opt [ToJson α] {parts : List (List (String × Json))} {i : Nat}
+    {k : String} {o : Option α} (hi : parts[i]? = some (opt k o))
+    (hpre : ∀ p ∈ parts.take i, k ∉ p.map Prod.fst)
+    (hpost : ∀ p ∈ parts.drop (i + 1), k ∉ p.map Prod.fst) :
+    (mkObj parts.flatten).getObjValD k = toJson o := by
+  rw [eq_take_cons_drop hi]
+  generalize parts.take i = pre at hpre ⊢
+  generalize parts.drop (i + 1) = post at hpost ⊢
+  cases o with
+  | some v => exact getObjValD_mkObj_field hpost
+  | none =>
+    have hnone : findLast? (List.flatten (pre ++ post)).toArray k = none := by
+      rw [findLast?_eq_none_iff]
+      simp only [fieldNames, List.map_flatten, List.mem_flatten, List.map_append, List.mem_append,
+        List.mem_map, not_exists, not_and]
+      grind
+    simp [mkObj, getObjValD, getObjVal?, opt, List.flatten_append] at hnone ⊢
+    simp [hnone]
+    rfl
+
 end
 
 end Json
