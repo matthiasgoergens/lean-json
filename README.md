@@ -107,7 +107,26 @@ structure Claim where
 deriving ToJson, FromJson
 ```
 
-With both codecs derived, a structure also gets `T.fromJson?_toJson`, which takes one hypothesis per field, named after it, saying that field round trips, and a `LawfulJson` instance when every field type has one. `Nat` and `Int` have none, their round trip failing beyond a thousand trailing zeros, so a structure holding them gets the theorem only, and one that holds its integers as `UInt8` to `UInt64` or `Fin n` gets the instance; nor does a structure whose field types depend on its other fields, or with an instance parameter, or an inductive type with constructors.
+With both codecs derived, a structure also gets `T.fromJson?_toJson`, which takes one hypothesis per field, named after it, saying that field round trips, and a `LawfulJson` instance when every field type has one. `Nat` and `Int` have none, their round trip failing beyond a thousand trailing zeros, so a structure holding them gets the theorem only, and one that holds its integers as `UInt8` to `UInt64` or `Fin n` gets the instance; nor does a structure whose field types depend on its other fields, or with an instance parameter, or an inductive type with constructors, which includes one of nullary constructors that has no `@[json_enum]`: that is derived as before and gets no round-trip theorem.
+
+`@[json_enum]` on an inductive type whose constructors carry nothing makes it an enumeration, each constructor written as a JSON string: its name, or a convention as for `json_keys`, with `(ctor := "string")` for the exceptions. A constructor may also carry one argument of another enumeration, and is then written as that argument is, so a vocabulary declared once can be a member of several others. The decoder accepts the strings and nothing else, and refuses any other with a message naming the type and the string; two members written alike are refused when the codec is derived (a type with the attribute and no `deriving` clause is not checked), embedded ones included, and so is a constructor named like a declaration the derivation adds (`all`, `toJsonString`, `mem_all`, `nodup_all`, `jsonKey`, `jsonKeyTree`, `ofJsonString?` or the name of one of its theorems, such as `find?_jsonKey`), or one that `camelCase` would write as the empty string.
+
+```lean
+@[json_enum kebab-case]
+inductive Move where
+  | lineRoundTrip           -- "line-round-trip"
+  | swap
+deriving ToJson, FromJson
+
+@[json_enum SCREAMING_SNAKE_CASE (unplaced := "NONE")]
+inductive Step where
+  | workOut                 -- "WORK_OUT"
+  | unplaced                -- "NONE"
+  | move (m : Move)         -- "line-round-trip", "swap"
+deriving ToJson, FromJson
+```
+
+An enumeration also gets `T.toJsonString`, its string without going through `Json`, for text such as CSV or a prompt; `T.all`, every value in declaration order, and `T.mem_all` and `T.nodup_all`, that each is in it once; the class `JsonEnum` collecting these with `toJson x = .str (toJsonString x)`; and, with both codecs, `LawfulJson` and `ExactJson`, the decoder accepting only the members' strings, which together make the codec a bijection. The decoder looks a string up by a number computed from its bytes, down a balanced tree, so that the proofs cost about the same for each member rather than growing with their number. Without the attribute, a type of nullary constructors is derived as any other inductive type.
 
 Recursive types are derived too, through the type itself or an `Array`, `List` or `Option` of it. A field that mentions its own type in some other shape, and a group of mutually defined types, are refused at derive time rather than derived as something that might not terminate.
 

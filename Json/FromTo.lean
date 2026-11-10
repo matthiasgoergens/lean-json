@@ -605,6 +605,14 @@ theorem LawfulJson.toJson_injective [ToJson α] [FromJson α] [LawfulJson α] {a
   rw [h, LawfulJson.fromJson?_toJson] at this
   exact Except.ok.inj this |>.symm
 
+/--
+The decoder accepts only what the encoder writes, each value's encoding and nothing else. With
+`LawfulJson` it makes the codec a bijection between values and their encodings.
+-/
+class ExactJson (α : Type u) [ToJson α] [FromJson α] : Prop where
+  eq_toJson_of_fromJson? : ∀ (j : Json) (x : α), (fromJson? j : Except String α) = .ok x →
+    j = toJson x
+
 /-- No value is encoded as `null`, which is what lets `Option α` round trip. -/
 class NonNullJson (α : Type u) [ToJson α] : Prop where
   toJson_ne_null : ∀ x : α, toJson x ≠ null
