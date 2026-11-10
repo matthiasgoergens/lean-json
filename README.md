@@ -96,6 +96,17 @@ deriving ToJson, FromJson
 #eval compress (json% {here: $(({ x := 1, y := 2, label? := none } : Point)), ok: true})
 ```
 
+Keys follow the field names unless the structure says otherwise. `@[json_keys snake_case]` writes `whyNone` as `why_none`, and `(field := "key")` gives one field a key of its own, which the convention does not touch. Both parts are optional, the encoding keeps the structure's field order, and the decoder accepts only the keys the encoder writes. Two fields that end up under one key are refused at derive time. Lean allows no attribute on a field, so the overrides sit on the structure. Fields of constructors are not renamed.
+
+```lean
+@[json_keys snake_case (notKnown := "not-known")]
+structure Claim where
+  whyNone : String        -- "why_none"
+  notKnown : Nat          -- "not-known"
+  perOption? : Option Nat -- "per_option", left out when absent
+deriving ToJson, FromJson
+```
+
 Recursive types are derived too, through the type itself or an `Array`, `List` or `Option` of it. A field that mentions its own type in some other shape, and a group of mutually defined types, are refused at derive time rather than derived as something that might not terminate.
 
 ## Streams

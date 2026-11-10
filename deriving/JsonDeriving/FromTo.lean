@@ -5,6 +5,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 module
 
 public import Json
+public import JsonDeriving.Keys
 public meta import Lean.Elab.Deriving.Basic
 public meta import Lean.Elab.Deriving.Util
 
@@ -80,11 +81,33 @@ where
     if mentions indName type then unsupportedField indName type
     else `(_root_.Json.FromJson.fromJson? $j)
 
-/-- A field named with a trailing `?` is optional, and drops out of the object when absent. -/
-private meta def jsonFieldName (n : Name) : TermElabM (Bool × Term) := do
+/--
+A field named with a trailing `?` is optional, and drops out of the object when absent. Its key is
+the one `json_keys` gives it, else its name without the `?` under the structure's convention.
+-/
+private meta def jsonFieldName (indName : Name) (n : Name) : TermElabM (Bool × Term) := do
   let .str .anonymous s := n | throwError "cannot derive a JSON codec for the field name {n}"
   let stripped := s.dropEndWhile (· == '?') |>.copy
-  return (s != stripped, Lean.quote stripped)
+  let naming := keyNaming (← getEnv) indName
+  let key :=
+    match naming.overrides.find? (·.1 == n) with
+    | some (_, key) => key
+    | none =>
+      match naming.convention with
+      | some convention => convention.apply stripped
+      | none => stripped
+  return (s != stripped, Lean.quote key)
+
+/-- Two fields under one key would make an object that reads back as something else. -/
+private meta def checkKeysDistinct (indName : Name) (fields : Array Name) : TermElabM Unit := do
+  let keys ← fields.mapM fun field => do
+    let (_, key) ← jsonFieldName indName field
+    return (field, key.raw.isStrLit?.getD "")
+  for h : i in *...keys.size do
+    for (other, key) in keys.extract 0 i do
+      if key == keys[i].2 then
+        throwError "cannot derive a JSON codec for {indName}: the fields {other} and \
+{keys[i].1} would both be written as \"{key}\""
 
 private meta def theOnlyType (ctx : Deriving.Context) (indName : Name) :
     TermElabM InductiveVal := do
@@ -112,8 +135,9 @@ private meta def mkToJsonBodyForStruct (indName : Name) (aux : Ident) (header : 
     TermElabM Term := do
   let target := mkIdent header.targetNames[0]!
   let fields := getStructureFieldsFlattened (← getEnv) indName (includeSubobjectFields := false)
+  checkKeysDistinct indName fields
   let parts ← fields.mapM fun field => do
-    let (isOptional, name) ← jsonFieldName field
+    let (isOptional, name) ← jsonFieldName indName field
     let type ← fieldType indName field
     let access ← `(($target).$(mkIdent field):ident)
     if isOptional then
@@ -181,8 +205,9 @@ where
 private meta def mkFromJsonBodyForStruct (indName : Name) (aux : Ident) (fuel : Ident)
     (json : Ident) : TermElabM Term := do
   let fields := getStructureFieldsFlattened (← getEnv) indName (includeSubobjectFields := false)
+  checkKeysDistinct indName fields
   let getters : Array (TSyntax `doElem) ← fields.mapM fun field => do
-    let (_, name) ← jsonFieldName field
+    let (_, name) ← jsonFieldName indName field
     let type ← fieldType indName field
     let source ← `(($json).getObjValD $name)
     let decoded ← decodeField indName aux fuel source type

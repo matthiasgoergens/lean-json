@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* `@[json_keys]` on a structure renames the JSON keys of its derived codecs, by a `snake_case` convention and per field
+
 ## [0.3.1] - 2026-10-18
 
 * Chore: bump dependencies
