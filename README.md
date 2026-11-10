@@ -76,7 +76,7 @@ An object's members keep the order they were written in, and a repeated name is 
 #eval fromJson? (α := Array Nat) (toJson #[1, 2, 3])   -- Except.ok #[1, 2, 3]
 ```
 
-Instances ship for `Json`, `Number`, `Bool`, `Nat`, `Int`, `String`, `String.Slice`, `Unit`, `Empty`, `Float`, `USize`, `UInt64`, `System.FilePath`, `Structured`, `Array`, `List`, `Option`, `Prod` and `Std.TreeMap String`. `USize`, `UInt64` and `Nat` beyond the `Float` range go through `bignumToJson` / `bignumFromJson?`, which use a string to avoid a lossy round trip.
+Instances ship for `Json`, `Number`, `Bool`, `Nat`, `Int`, `Fin n`, `String`, `String.Slice`, `Unit`, `Empty`, `Float`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `USize`, `System.FilePath`, `Structured`, `Array`, `List`, `Option`, `Prod` and `Std.TreeMap String`. `UInt8`, `UInt16`, `UInt32` and `Fin n` are numbers, a number out of range being refused; `USize`, `UInt64` and `Nat` beyond the `Float` range go through `bignumToJson` / `bignumFromJson?`, which use a string to avoid a lossy round trip.
 
 Helpers for writing instances by hand: `getObjValAs?`, `setObjValAs?`, `opt`, `getTag?`, `parseTagged`, `parseCtorFields`, `toStructured?`.
 
@@ -107,7 +107,7 @@ structure Claim where
 deriving ToJson, FromJson
 ```
 
-With both codecs derived, a structure also gets `T.fromJson?_toJson`, which takes one hypothesis per field, named after it, saying that field round trips, and a `LawfulJson` instance when every field type has one. `Nat` and `Int` have none, their round trip failing beyond a thousand trailing zeros, so a structure holding them gets the theorem only; nor does a structure whose field types depend on its other fields, or with an instance parameter, or an inductive type with constructors.
+With both codecs derived, a structure also gets `T.fromJson?_toJson`, which takes one hypothesis per field, named after it, saying that field round trips, and a `LawfulJson` instance when every field type has one. `Nat` and `Int` have none, their round trip failing beyond a thousand trailing zeros, so a structure holding them gets the theorem only, and one that holds its integers as `UInt8` to `UInt64` or `Fin n` gets the instance; nor does a structure whose field types depend on its other fields, or with an instance parameter, or an inductive type with constructors.
 
 Recursive types are derived too, through the type itself or an `Array`, `List` or `Option` of it. A field that mentions its own type in some other shape, and a group of mutually defined types, are refused at derive time rather than derived as something that might not terminate.
 
@@ -143,7 +143,7 @@ Each of these is a theorem shipped with the library, so a proof of your own can 
 - **Every traversal runs iteratively.** `beq`, `hash`, `uniqueKeys`, `canonicalNumbers` and `depth` are each proved equal to a form holding its pending work in a list, and it is that form that runs (`Alg.fold_eq_run`). A claim stated about the plain recursion is therefore a claim about what the program does, at any depth.
 - **Output is always valid UTF-8**, by construction, since it is a `String`.
 - **The path laws**: what `set?` puts at a path is what `get?` finds there (`get?_set?`), and putting back what is already there leaves the value alone (`set?_get?`).
-- **Codec round trips**: for `Json`, `Number`, `Bool`, `String` and `Unit` outright, for `Int` and `Nat` within the padding bound, and for `Option`, `Prod`, `Array` and `List` from the round trip of whatever they hold. `LawfulJson α` records an unconditional round trip as an instance, so that a proof can ask for it of a type's parts, and `LawfulJson.toJson_injective` says two values encoded alike are equal.
+- **Codec round trips**: for `Json`, `Number`, `Bool`, `String` and `Unit` outright, for `Int` and `Nat` within the padding bound, and for `Option`, `Prod`, `Array` and `List` from the round trip of whatever they hold. `LawfulJson α` records an unconditional round trip as an instance, which the unsigned types and `Fin n` have and `Nat` and `Int` do not, so that a proof can ask for it of a type's parts, and `LawfulJson.toJson_injective` says two values encoded alike are equal.
 - **Derived structures round trip**: `T.fromJson?_toJson` decodes a derived structure's encoding back to the value whenever each field does, and `T` is `LawfulJson` when every field type is.
 
 Not proved, and covered by tests instead:

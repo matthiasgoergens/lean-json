@@ -31,6 +31,15 @@ structure Box (α : Type) where
   more? : Option α
 deriving ToJson, FromJson
 
+/-- Integers held in bounded types, which is what makes a structure with numbers lawful. -/
+@[json_keys snake_case]
+structure Reading where
+  sensorId : UInt32
+  channel : Fin 8
+  seq : UInt64
+  level? : Option UInt8
+deriving ToJson, FromJson
+
 structure Nothing where
 deriving ToJson, FromJson
 
@@ -44,6 +53,7 @@ example : LawfulJson Nothing := inferInstance
 example : LawfulJson Hidden := inferInstance
 example : LawfulJson (Box Tag) := inferInstance
 example : LawfulJson (Array (Option Entry)) := inferInstance
+example : LawfulJson Reading := inferInstance
 
 -- `Option (Option α)` does not round trip, and the instance for `Box` must not claim it does.
 /--
