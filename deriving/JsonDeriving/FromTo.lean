@@ -90,13 +90,7 @@ private meta def jsonFieldName (indName : Name) (n : Name) : TermElabM (Bool × 
   let .str .anonymous s := n | throwError "cannot derive a JSON codec for the field name {n}"
   let stripped := s.dropEndWhile (· == '?') |>.copy
   let naming := keyNaming (← getEnv) indName
-  let key :=
-    match naming.overrides.find? (·.1 == n) with
-    | some (_, key) => key
-    | none =>
-      match naming.convention with
-      | some convention => convention.apply stripped
-      | none => stripped
+  let key := naming.apply n stripped
   return (s != stripped, Lean.quote key)
 
 /-- Two fields under one key would make an object that reads back as something else. -/

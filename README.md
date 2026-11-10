@@ -96,7 +96,7 @@ deriving ToJson, FromJson
 #eval compress (json% {here: $(({ x := 1, y := 2, label? := none } : Point)), ok: true})
 ```
 
-Keys follow the field names unless the structure says otherwise. `@[json_keys snake_case]` writes `whyNone` as `why_none`, and `(field := "key")` gives one field a key of its own, which the convention does not touch. Both parts are optional, the encoding keeps the structure's field order, and the decoder accepts only the keys the encoder writes. Two fields that end up under one key are refused at derive time. Lean allows no attribute on a field, so the overrides sit on the structure. Fields of constructors are not renamed.
+Keys follow the field names unless the structure says otherwise. `@[json_keys snake_case]` writes `whyNone` as `why_none` (the other conventions are `SCREAMING_SNAKE_CASE`, `kebab-case` and `camelCase`; a run of capitals such as `URL` is one word, and `camelCase` ignores underscores at the ends of a name or doubled), and `(field := "key")` gives one field a key of its own, which the convention does not touch. Both parts are optional, the encoding keeps the structure's field order, and the decoder looks for the keys the encoder writes, not the field names they replace, and ignores keys it does not know. Two fields that end up under one key are refused at derive time. Lean allows no attribute on a field, so the overrides sit on the structure. Fields of constructors are not renamed.
 
 ```lean
 @[json_keys snake_case (notKnown := "not-known")]
