@@ -8,6 +8,7 @@ public import Json
 public import JsonDeriving.Keys
 public meta import Lean.Elab.Deriving.Basic
 public meta import Lean.Elab.Deriving.Util
+public meta import Lean.Meta.StringLitProof
 
 public section
 
@@ -267,10 +268,166 @@ private meta def mkFromJsonBodyForInduct (indVal : InductiveVal) (aux : Ident) (
       | _ => Except.error $unknown
     | none => Except.error "expected a string, or an object of one field, naming a constructor")
 
+/-! ## Round trips
+
+Once both codecs of a structure are derived, the second handler to run adds
+`T.fromJson?_toJson`, the round trip for one value given the round trip of each of its fields,
+and a `LawfulJson` instance when every field type has one. The proof finds each field by its key
+in the encoded object and rewrites the decoder with what it finds. A structure gets neither when a
+field's type depends on another field's value, which defeats rewriting under the decoder's
+binders, or when it has an instance parameter, which the generated binders cannot supply; nor
+does an inductive type with constructors, whose proof would have to follow the tag dispatch.
+-/
+
+/--
+A proof that two different string literals differ, which the generated proofs need of every pair
+of keys. A tactic for each pair would cost more than the rest of the proof put together.
+-/
+syntax (name := keysNe) "json_keys_ne% " str ppSpace str : term
+
+@[term_elab keysNe] meta def elabKeysNe : Term.TermElab := fun stx _ => do
+  match stx with
+  | `(json_keys_ne% $a:str $b:str) =>
+    if a.getString == b.getString then throwError "the keys {a} and {b} are the same"
+    mkStringLitNeProof a.getString b.getString
+  | _ => throwUnsupportedSyntax
+
+/--
+The encoder or decoder function derived for each type, by class, so that the second handler can
+find what the first defined: a hand-written instance is nothing the proof could unfold.
+-/
+private meta initialize derivedCodecs :
+    SimplePersistentEnvExtension (Name × Name × Name) (Std.HashMap (Name × Name) Name) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (cls, decl, aux) => m.insert (cls, decl) aux
+    addImportedFn := fun modules => modules.foldl (init := {}) fun m entries =>
+      entries.foldl (init := m) fun m (cls, decl, aux) => m.insert (cls, decl) aux
+  }
+
+private meta def derivedCodec? (env : Environment) (cls decl : Name) : Option Name :=
+  (derivedCodecs.getState env)[(cls, decl)]?
+
+/--
+The types of the fields of `x`, or `none` if one of them depends on the value through an
+earlier field.
+-/
+private meta def independentFieldTypes (fields : Array Name) (x : Expr) :
+    TermElabM (Option (Array Expr)) := do
+  let types ← fields.mapM fun field => do
+    inferType (← mkProjection x field)
+  let x := x.fvarId!
+  return if types.any (·.containsFVar x) then none else some types
+
+/-- Whether `LawfulJson` is known for `type`, in the local context of the instance. -/
+private meta def hasLawful (type : Expr) : TermElabM Bool := do
+  try
+    let inst ← mkAppOptM ``_root_.Json.LawfulJson #[some type, none, none]
+    return (← synthInstance? inst).isSome
+  catch _ =>
+    return false
+
+open TSyntax.Compat in
+private meta def mkRoundTripCmds (declName fromAux : Name) : TermElabM (Array Command) := do
+  let env ← getEnv
+  let indVal ← getConstInfoInduct declName
+  if !isStructure env declName || indVal.isRec then return #[]
+  -- The generated binders leave a parameter's type to be inferred, and one inferred that way is
+  -- not a local instance, so a field projection asking for it would fail.
+  let instParam ← forallBoundedTelescope indVal.type indVal.numParams fun xs _ =>
+    xs.anyM fun x => return (← x.fvarId!.getDecl).binderInfo.isInstImplicit
+  if instParam then return #[]
+  let fields := getStructureFieldsFlattened env declName (includeSubobjectFields := false)
+  let argNames ← mkInductArgNames indVal
+  let indType ← mkInductiveApp indVal argNames
+  let mut valueName := `x
+  while fields.contains valueName do
+    valueName := valueName.appendAfter "'"
+  let x := mkIdent valueName
+  let codecBinders := (← mkImplicitBinders argNames) ++
+    (← mkInstImplicitBinders ``_root_.Json.ToJson indVal argNames) ++
+    (← mkInstImplicitBinders ``_root_.Json.FromJson indVal argNames)
+  let lawfulBinders := codecBinders ++
+    (← mkInstImplicitBinders ``_root_.Json.LawfulJson indVal argNames)
+  -- A parameter that an optional field holds has to be `NonNullJson` as well, which is asked only
+  -- where it is needed, so as not to narrow the instance for every other structure.
+  let nonNullBinders := lawfulBinders ++
+    (← mkInstImplicitBinders ``_root_.Json.NonNullJson indVal argNames)
+  let valueBinder ← `(bracketedBinderF|($x : $indType))
+  -- Whether a field type depends on the value, and whether every one is lawful, are both asked
+  -- in the context the instance would be declared in.
+  let lawfulUnder (binders : Array (TSyntax ``bracketedBinder)) : TermElabM (Option Bool) :=
+    Term.elabBinders (binders.push valueBinder) fun xs => do
+      let some self := xs.back? | return none
+      let some types ← independentFieldTypes fields self | return none
+      return some (← types.allM hasLawful)
+  let some lawful ← lawfulUnder lawfulBinders | return #[]
+  let instBinders? ←
+    if lawful then pure (some lawfulBinders)
+    else if nonNullBinders.size == lawfulBinders.size then pure none
+    else if (← lawfulUnder nonNullBinders) == some true then pure (some nonNullBinders)
+    else pure none
+  let hyps ← fields.mapM fun field => do
+    let f := mkIdent field
+    `(bracketedBinderF|($f : _root_.Json.FromJson.fromJson?
+        (_root_.Json.ToJson.toJson ($x).$f:ident) = Except.ok ($x).$f:ident))
+  let keys ← fields.mapM (jsonFieldName declName)
+  -- That no other part carries a field's key is proved part by part, down to the inequality of
+  -- two string literals, never by a search through the whole object.
+  let distinct (i : Nat) (js : Array Nat) : TermElabM Term := do
+    let some (_, key) := keys[i]? | throwError "cannot find the key of field {i} of {declName}"
+    js.foldrM (init := ← `(List.forall_mem_nil _)) fun j rest => do
+      let some (isOptional, other) := keys[j]? |
+        throwError "cannot find the key of field {j} of {declName}"
+      let ne ← `(json_keys_ne% $(⟨key⟩) $(⟨other⟩))
+      let part ← if isOptional then `(_root_.Json.not_mem_keys_opt $ne)
+        else `(_root_.Json.not_mem_keys_single $ne)
+      `(List.forall_mem_cons.2 ⟨$part, $rest⟩)
+  let lookupNames ← fields.mapM fun _ => return mkIdent (← mkFreshUserName `lookup)
+  let lookups ← (fields.zip (keys.zip lookupNames)).mapIdxM
+      fun i (field, (isOptional, key), name) => do
+    let f := mkIdent field
+    let after ← distinct i ((List.range' (i + 1) (fields.size - (i + 1))).toArray)
+    -- The parts are found by unifying with the encoding rather than written out again, which for
+    -- every field would elaborate every other field's part once more.
+    let lemma ←
+      if isOptional then
+        let before ← distinct i (List.range i).toArray
+        `(_root_.Json.getObjValD_mkObj_get_opt (i := $(quote i)) rfl $before $after)
+      else
+        `(_root_.Json.getObjValD_mkObj_get (i := $(quote i)) rfl $after)
+    `(tactic| have $name:ident : (_root_.Json.ToJson.toJson $x).getObjValD $key =
+        _root_.Json.ToJson.toJson ($x).$f:ident := $lemma)
+  let fromAux := mkIdent (`_root_ ++ fromAux)
+  let unfolded ← `(tactic|
+    (show $fromAux (_root_.Json.ToJson.toJson $x) = _; unfold $fromAux:ident))
+  -- `rw` rather than `simp`: each rule is closed, so one abstraction each finds it under the
+  -- decoder's binders, where `simp` would revisit every binder for every rule.
+  let rules := lookupNames ++ fields.map mkIdent
+  let rewrite ← if fields.isEmpty then pure #[] else pure #[← `(tactic| rw [$[$rules:term],*])]
+  let tactics := lookups ++ #[unfolded] ++ rewrite ++ #[← `(tactic| rfl)]
+  let name := privateToUserName declName |>.str "fromJson?_toJson"
+  let thm := mkIdent (`_root_ ++ name)
+  let visibility ← if isPrivateName declName then
+      some <$> `(Lean.Parser.Command.visibility| private)
+    else pure none
+  let thmCmd ← `(
+    /-- A value round trips through its derived codec when each of its fields does. -/
+    $[$visibility:visibility]? theorem $thm:ident $codecBinders:bracketedBinder* $valueBinder
+        $hyps:bracketedBinder* :
+        (_root_.Json.FromJson.fromJson? (_root_.Json.ToJson.toJson $x) : Except String $indType) =
+          Except.ok $x := by
+      $[$tactics:tactic]*)
+  let some instBinders := instBinders? | return #[thmCmd]
+  let args ← fields.mapM fun _ => `(_root_.Json.LawfulJson.fromJson?_toJson _)
+  let instCmd ← `(
+    instance $instBinders:bracketedBinder* : _root_.Json.LawfulJson $indType :=
+      ⟨fun $x:ident => $thm $x $args*⟩)
+  return #[thmCmd, instCmd]
+
 /-! ## The commands -/
 
 open TSyntax.Compat in
-private meta def mkToJsonCmds (declName : Name) : TermElabM (Array Command) := do
+private meta def mkToJsonCmds (declName : Name) : TermElabM (Array Command × Ident) := do
   let ctx ← mkContext ``_root_.Json.ToJson "toJson" declName
   let indVal ← theOnlyType ctx declName
   let aux := mkIdent ctx.auxFunNames[0]!
@@ -282,10 +439,19 @@ private meta def mkToJsonCmds (declName : Name) : TermElabM (Array Command) := d
     else
       mkToJsonBodyForInduct indVal aux header
   let auxCmd ← `(def $aux:ident $binders:bracketedBinder* : _root_.Json := $body)
-  return #[auxCmd] ++ (← mkInstanceCmds ctx ``_root_.Json.ToJson #[declName])
+  let instCmds ← mkInstanceCmds ctx ``_root_.Json.ToJson #[declName]
+  if !isStructure (← getEnv) declName then return (#[auxCmd] ++ instCmds, aux)
+  -- An object, whatever the fields hold, which is what lets an optional field of this type
+  -- round trip.
+  let argNames ← mkInductArgNames indVal
+  let nonNullBinders := (← mkImplicitBinders argNames) ++
+    (← mkInstImplicitBinders ``_root_.Json.ToJson indVal argNames)
+  let nonNullCmd ← `(instance $nonNullBinders:bracketedBinder* :
+      _root_.Json.NonNullJson $(← mkInductiveApp indVal argNames) := ⟨fun _ => nofun⟩)
+  return (#[auxCmd] ++ instCmds ++ #[nonNullCmd], aux)
 
 open TSyntax.Compat in
-private meta def mkFromJsonCmds (declName : Name) : TermElabM (Array Command) := do
+private meta def mkFromJsonCmds (declName : Name) : TermElabM (Array Command × Ident) := do
   let ctx ← mkContext ``_root_.Json.FromJson "fromJson" declName
   let indVal ← theOnlyType ctx declName
   let aux := mkIdent ctx.auxFunNames[0]!
@@ -326,18 +492,34 @@ private meta def mkFromJsonCmds (declName : Name) : TermElabM (Array Command) :=
     else
       `(instance $(mkIdent ctx.instName):ident $instBinders:bracketedBinder* : $instType :=
           ⟨$aux⟩)
-  return #[auxCmd, instCmd]
+  return (#[auxCmd, instCmd], aux)
+
+/--
+Records the function a handler defined, and adds the round trip if the other codec was derived
+already.
+-/
+private meta def addRoundTrip (cls declName : Name) (aux : Ident) : CommandElabM Unit := do
+  let aux ← resolveGlobalConstNoOverload aux
+  modifyEnv (derivedCodecs.addEntry · (cls, declName, aux))
+  let env ← getEnv
+  if let some fromAux := derivedCodec? env ``_root_.Json.FromJson declName then
+    if (derivedCodec? env ``_root_.Json.ToJson declName).isSome then
+      (← liftTermElabM <| mkRoundTripCmds declName fromAux).forM elabCommand
 
 meta def toJsonHandler (declNames : Array Name) : CommandElabM Bool := do
   if declNames.size == 1 && (← isInductive declNames[0]!) then
-    (← liftTermElabM <| mkToJsonCmds declNames[0]!).forM elabCommand
+    let (cmds, aux) ← liftTermElabM <| mkToJsonCmds declNames[0]!
+    cmds.forM elabCommand
+    addRoundTrip ``_root_.Json.ToJson declNames[0]! aux
     return true
   else
     return false
 
 meta def fromJsonHandler (declNames : Array Name) : CommandElabM Bool := do
   if declNames.size == 1 && (← isInductive declNames[0]!) then
-    (← liftTermElabM <| mkFromJsonCmds declNames[0]!).forM elabCommand
+    let (cmds, aux) ← liftTermElabM <| mkFromJsonCmds declNames[0]!
+    cmds.forM elabCommand
+    addRoundTrip ``_root_.Json.FromJson declNames[0]! aux
     return true
   else
     return false

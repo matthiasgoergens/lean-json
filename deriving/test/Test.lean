@@ -6,6 +6,7 @@ import Test.Runner
 import Test.Codecs
 import Test.Syntax
 import Test.Keys
+import Test.Lawful
 
 namespace Test
 
