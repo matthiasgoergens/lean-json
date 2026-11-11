@@ -986,6 +986,24 @@ theorem findLast?_eq_none_iff (a : Array (String × α)) (k : String) :
     · simp [findLast?_push, h, ih, Ne.symm h]
 
 /--
+Lookup in two runs of fields put together finds the second run's field if it has one, and only
+otherwise the first's. An object built by concatenating parts, as a derived encoder builds one, is
+read by asking each part in turn, and this is the step that lets a proof do so.
+
+`findLast? (a ++ b) k` is the last field named `k` in the whole. `(findLast? b k).or
+(findLast? a k)` is `b`'s answer when it has one and `a`'s otherwise, which is last-wins read from
+the right: a field in `b` comes after every field in `a`.
+-/
+theorem findLast?_append (a b : Array (String × α)) (k : String) :
+    findLast? (a ++ b) k = (findLast? b k).or (findLast? a k) := by
+  induction b using Array.pushInduction with
+  | empty => simp [findLast?]
+  | push b x ih =>
+    obtain ⟨key, v⟩ := x
+    rw [Array.append_push, findLast?_push, findLast?_push, ih]
+    split <;> simp
+
+/--
 A name has no position exactly when the object does not have it. Positions and values are found by
 two separate folds, so their agreeing about which names exist is a claim in its own right, and it
 is what lets an update be driven by the result of a lookup.

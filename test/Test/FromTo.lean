@@ -27,6 +27,8 @@ def values : Array TestCase := #[
   -- Sixty-four bit integers travel as strings, since a JavaScript number would truncate them.
   expectEq "UInt64 is a string" (compress (toJson (2 ^ 63 : UInt64))) "\"9223372036854775808\"",
   expectEq "USize is a string" (compress (toJson (12 : USize))) "\"12\"",
+  expectEq "UInt32 is a number" (compress (toJson (4000000000 : UInt32))) "4000000000",
+  expectEq "a Fin is a number" (compress (toJson (7 : Fin 10))) "7",
   expectEq "a tree map is an object, in key order"
     (compress (toJson (Std.TreeMap.empty.insert "b" 2 |>.insert "a" 1 : Std.TreeMap String Nat)))
     "{\"a\":1,\"b\":2}"
@@ -67,6 +69,14 @@ def decoding : Array TestCase := #[
   refuses "a non-numeral string is not a UInt64" (.str "12a") UInt64,
   -- A digit run long enough to be expensive is refused unread.
   refuses "a two thousand digit string is refused" (.str ("1".pushn '0' 2000)) UInt64,
+  decodes "the largest UInt8" (.num 255) UInt8 255,
+  refuses "a value too large for UInt8" (.num 256) UInt8,
+  refuses "a value too large for UInt32" (.num 4294967296) UInt32,
+  decodes "the largest value of a Fin" (.num 9) (Fin 10) 9,
+  refuses "the bound of a Fin is not one of its values" (.num 10) (Fin 10),
+  -- The padding allowed is the bound's digits, so a large Fin value written short still reads.
+  decodes "a Fin value written with an exponent" (.num ⟨1, 20⟩) (Fin (10 ^ 21))
+    ⟨10 ^ 20, by decide⟩,
   decodes "null decodes as none" .null (Option Nat) none,
   decodes "a missing field decodes as none"
     (getObjValD sample "absent") (Option Nat) none

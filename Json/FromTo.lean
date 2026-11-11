@@ -21,7 +21,8 @@ Encoding to and decoding from `Json`.
 A decoder returns `Except String α`, and the message is written for a person to read. `none` is
 `null` and `some a` is whatever `a` is, so `Option (Option α)` does not round trip, as in every
 library that makes that choice. `USize` and `UInt64` are written as decimal strings, a JavaScript
-number holding integers exactly only to `2 ^ 53 - 1`.
+number holding integers exactly only to `2 ^ 53 - 1`; the narrower unsigned types and `Fin n` are
+numbers, and a number out of their range is refused.
 
 The handlers for `deriving ToJson, FromJson` are in the companion package, which is where the
 frontend may be imported. What they generate calls the helpers at the end of this file.
@@ -174,6 +175,36 @@ instance : ToJson UInt64 := ⟨fun v => bignumToJson v.toNat⟩
 instance : FromJson UInt64 := ⟨fun j => do
   let n ← bignumFromJson? j
   if h : n < UInt64.size then .ok (UInt64.ofNatLT n h) else .error "value is too large for UInt64"⟩
+
+instance : ToJson UInt8 := ⟨fun v => toJson v.toNat⟩
+instance : FromJson UInt8 := ⟨fun j => do
+  let n ← getNat? j
+  if h : n < UInt8.size then .ok (UInt8.ofNatLT n h) else .error "value is too large for UInt8"⟩
+
+instance : ToJson UInt16 := ⟨fun v => toJson v.toNat⟩
+instance : FromJson UInt16 := ⟨fun j => do
+  let n ← getNat? j
+  if h : n < UInt16.size then .ok (UInt16.ofNatLT n h) else .error "value is too large for UInt16"⟩
+
+instance : ToJson UInt32 := ⟨fun v => toJson v.toNat⟩
+instance : FromJson UInt32 := ⟨fun j => do
+  let n ← getNat? j
+  if h : n < UInt32.size then .ok (UInt32.ofNatLT n h) else .error "value is too large for UInt32"⟩
+
+/--
+A number below `n`. The padding a number may ask for is bounded by the digits of `n` rather than by
+the general thousand, which refuses a long text sooner and lets every value of `Fin n` read back,
+however large `n` is.
+-/
+def finFromJson? (n : Nat) : Json → Except String (Fin n)
+  | num x =>
+    match x.toNat? (toString n).length with
+    | some v => if h : v < n then .ok ⟨v, h⟩ else .error s!"expected a natural number below {n}"
+    | none => .error s!"expected a natural number below {n}"
+  | _ => .error "expected a number"
+
+instance : ToJson (Fin n) := ⟨fun i => toJson i.val⟩
+instance : FromJson (Fin n) := ⟨finFromJson? n⟩
 
 /--
 A finite `Float` is a number, exactly; the three values IEEE 754 has and JSON does not are the
@@ -453,6 +484,314 @@ theorem list_roundTrip {α : Type} [ToJson α] [FromJson α]
   show Array.toList <$> (fromJson? (toJson l.toArray) : Except String (Array α)) = _
   rw [array_roundTrip h l.toArray]
   rfl
+
+/--
+A natural number below `2 ^ 64` round trips with no further hypothesis. Every unsigned type's
+values are below that bound, so this is the padding condition of `nat_roundTrip` discharged once
+for all of them.
+
+`h : n < 2 ^ 64` bounds `n` to twenty digits, and `Number.exponent_ofNat_le` turns that into an
+exponent of at most twenty, well inside the thousand `nat_roundTrip` asks for. The conclusion is
+`.ok n`.
+-/
+theorem nat_roundTrip_of_lt {n : Nat} (h : n < 2 ^ 64) :
+    (fromJson? (toJson n) : Except String Nat) = .ok n :=
+  nat_roundTrip (by
+    have := Number.exponent_ofNat_le (k := 20) (Nat.lt_of_lt_of_le h (by decide)); omega)
+
+/--
+Folding the decimal reader over digits computes their value. It is the inductive step of
+`decodeNat?_toString`, stated for any step function that does on a digit what the reader does.
+
+`hf` says `f` appends a digit to an accumulated value, `h` that every character of `l` is a digit,
+and the conclusion is the fold's result: `ofDigitChars`, core's value of a digit string, starting
+from `a`. With a character that is not a digit the claim would not hold, which is why `h` is asked.
+-/
+private theorem foldl_digits (f : Option Nat → Char → Option Nat)
+    (hf : ∀ v c, c.isDigit → f (some v) c = some (v * 10 + (c.toNat - '0'.toNat)))
+    (l : List Char) (a : Nat) (h : ∀ c ∈ l, c.isDigit) :
+    l.foldl f (some a) = some (Nat.ofDigitChars 10 l a) := by
+  induction l generalizing a with
+  | nil => simp
+  | cons c cs ih =>
+    rw [List.foldl_cons, hf a c (h c (by simp)), ih _ (fun c' hc' => h c' (by simp [hc'])),
+      Nat.ofDigitChars_cons, Nat.mul_comm]
+
+/--
+The decimal reader gives back any natural number written in decimal, when the numeral is within its
+digit limit. It is what makes the decimal-string encoding of `UInt64` and `USize` round trip.
+
+`hlen` says the numeral, `Nat.toDigits 10 n`, has at most `k` digits, `k` being the limit the
+reader enforces. The conclusion is `some n`: the reader neither refuses the numeral nor reads a
+different number from it.
+-/
+theorem decodeNat?_toString {n k : Nat} (hlen : (Nat.toDigits 10 n).length ≤ k) :
+    decodeNat? (toString n) k = some n := by
+  have hne := Nat.toDigits_ne_nil (n := n) (b := 10)
+  unfold decodeNat?
+  simp only [Nat.toString_eq_ofList_toDigits, String.length_ofList,
+    String.foldl_eq_foldl_toList, String.toList_ofList]
+  rw [ite_eq_right_of_eq_false _ _ (eq_false (by simp [hne]; omega))]
+  rw [foldl_digits _ ?_ _ 0 (fun c hc => Nat.isDigit_of_mem_toDigits (by decide) (by decide) hc)]
+  · simp
+  · intro v c hc
+    simp only [Char.isDigit, Bool.and_eq_true, decide_eq_true_eq] at hc
+    have : ('0' ≤ c && c ≤ '9') = true := by
+      simpa using (⟨hc.1, hc.2⟩ : '0' ≤ c ∧ c ≤ '9')
+    simp [this]
+
+/--
+A natural number below `2 ^ 64` written as a decimal string reads back. `UInt64` and `USize` are
+encoded that way, so this is their round trip apart from the range check.
+
+`h : n < 2 ^ 64` puts the numeral at twenty digits at most, inside the reader's default limit of a
+thousand, and the conclusion is `.ok n`.
+-/
+theorem bignum_roundTrip {n : Nat} (h : n < 2 ^ 64) : bignumFromJson? (bignumToJson n) = .ok n := by
+  have hlen : (Nat.toDigits 10 n).length ≤ 1000 := Nat.le_trans
+    ((Nat.length_toDigits_le_iff (k := 20) (by decide) (by decide)).2
+      (Nat.lt_of_lt_of_le h (by decide)))
+    (by decide)
+  show (match decodeNat? (toString n) 1000 with
+    | some v => Except.ok v | none => Except.error _) = _
+  rw [decodeNat?_toString hlen]
+
+/--
+A value of `Fin n` encoded and decoded again is the value it was, for every `n`. The decoder bounds
+padding by the digits of `n`, and no value below `n` has more trailing zeros than `n` has digits.
+
+`i : Fin n` is any value; there is no hypothesis. The conclusion is `.ok i`, the bound check having
+passed because `i` is below `n` and the padding check because of `Number.exponent_ofNat_le`.
+-/
+theorem fin_roundTrip {n : Nat} (i : Fin n) :
+    (fromJson? (toJson i) : Except String (Fin n)) = .ok i := by
+  have hlen : i.val < 10 ^ (toString n).length := by
+    have := (Nat.length_toDigits_le_iff (b := 10) (n := n) (k := (Nat.toDigits 10 n).length)
+      (by decide) Nat.length_toDigits_pos).1 (Nat.le_refl _)
+    rw [Nat.toString_eq_ofList_toDigits, String.length_ofList]
+    exact Nat.lt_trans i.isLt this
+  show finFromJson? n (num (Number.ofNat i.val)) = _
+  simp only [finFromJson?]
+  rw [Number.toNat?_ofNat (Number.exponent_ofNat_le hlen)]
+  simp [i.isLt]
+
+/-! ## Lawful codecs
+
+`LawfulJson α` says that `α`'s codec round trips for every value, so a proof about a type built
+from others can ask for it of its parts. `Nat` and `Int` have no instance, their round trip failing
+for a number with more than a thousand trailing zeros (`nat_roundTrip`); nor do `Float`, whose NaN
+does not come back as the same bits, `String.Slice`, which comes back as a slice of a new string,
+and `Std.TreeMap`, which is rebuilt by insertion and so not necessarily into the same tree. The
+unsigned types and `Fin n` have one, a bounded type being how an integer field is made lawful.
+`Option α` has one when `α`'s encoding is never `null`, which `NonNullJson` records.
+-/
+
+/-- Decoding the encoding of any value gives back that value. -/
+class LawfulJson (α : Type u) [ToJson α] [FromJson α] : Prop where
+  fromJson?_toJson : ∀ x : α, (fromJson? (toJson x) : Except String α) = .ok x
+
+/--
+Two values with the same encoding are the same value. It is what a lawful codec buys a caller
+beyond reading back: the encoding can stand in for the value as a key, a cache entry or a test
+expectation without two values being confused.
+
+`toJson a = toJson b` says the encodings are equal as `Json` trees, not merely as text, and the
+conclusion `a = b` is equality in `α`. Decoding both sides of the hypothesis gives `.ok a` and
+`.ok b` by `fromJson?_toJson`, and `Except.ok` is injective.
+-/
+theorem LawfulJson.toJson_injective [ToJson α] [FromJson α] [LawfulJson α] {a b : α}
+    (h : toJson a = toJson b) : a = b := by
+  have := LawfulJson.fromJson?_toJson (α := α) a
+  rw [h, LawfulJson.fromJson?_toJson] at this
+  exact Except.ok.inj this |>.symm
+
+/-- No value is encoded as `null`, which is what lets `Option α` round trip. -/
+class NonNullJson (α : Type u) [ToJson α] : Prop where
+  toJson_ne_null : ∀ x : α, toJson x ≠ null
+
+instance : LawfulJson Json := ⟨json_roundTrip⟩
+instance : LawfulJson Number := ⟨number_roundTrip⟩
+instance : LawfulJson Bool := ⟨bool_roundTrip⟩
+instance : LawfulJson String := ⟨string_roundTrip⟩
+instance : LawfulJson Unit := ⟨fun () => unit_roundTrip⟩
+instance : LawfulJson Empty := ⟨nofun⟩
+instance : LawfulJson System.FilePath := ⟨fun _ => rfl⟩
+instance : LawfulJson Structured := ⟨fun | .arr _ => rfl | .obj _ => rfl⟩
+instance : LawfulJson (Fin n) := ⟨fin_roundTrip⟩
+
+-- A bounded unsigned value is its `Nat` encoded, then range checked, which it passes.
+instance : LawfulJson UInt8 := ⟨fun v => by
+  show (do let n ← (fromJson? (toJson v.toNat) : Except String Nat); _) = _
+  rw [nat_roundTrip_of_lt (Nat.lt_of_lt_of_le v.toNat_lt_size (by decide))]
+  exact dite_eq_left v.toNat_lt_size⟩
+
+instance : LawfulJson UInt16 := ⟨fun v => by
+  show (do let n ← (fromJson? (toJson v.toNat) : Except String Nat); _) = _
+  rw [nat_roundTrip_of_lt (Nat.lt_of_lt_of_le v.toNat_lt_size (by decide))]
+  exact dite_eq_left v.toNat_lt_size⟩
+
+instance : LawfulJson UInt32 := ⟨fun v => by
+  show (do let n ← (fromJson? (toJson v.toNat) : Except String Nat); _) = _
+  rw [nat_roundTrip_of_lt (Nat.lt_of_lt_of_le v.toNat_lt_size (by decide))]
+  exact dite_eq_left v.toNat_lt_size⟩
+
+instance : LawfulJson UInt64 := ⟨fun v => by
+  show (do let n ← bignumFromJson? (bignumToJson v.toNat); _) = _
+  rw [bignum_roundTrip v.toNat_lt_size]
+  exact dite_eq_left v.toNat_lt_size⟩
+
+instance : LawfulJson USize := ⟨fun v => by
+  show (do let n ← bignumFromJson? (bignumToJson v.toNat); _) = _
+  rw [bignum_roundTrip (Nat.lt_of_lt_of_le v.toNat_lt_size USize.size_le)]
+  exact dite_eq_left v.toNat_lt_size⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] : LawfulJson (Array α) :=
+  ⟨array_roundTrip LawfulJson.fromJson?_toJson⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] : LawfulJson (List α) :=
+  ⟨list_roundTrip LawfulJson.fromJson?_toJson⟩
+
+instance {α β : Type} [ToJson α] [FromJson α] [LawfulJson α] [ToJson β] [FromJson β]
+    [LawfulJson β] : LawfulJson (α × β) :=
+  ⟨prod_roundTrip LawfulJson.fromJson?_toJson LawfulJson.fromJson?_toJson⟩
+
+instance {α : Type} [ToJson α] [FromJson α] [LawfulJson α] [NonNullJson α] :
+    LawfulJson (Option α) :=
+  ⟨fun
+    | none => option_none_roundTrip
+    | some a =>
+      option_some_roundTrip LawfulJson.fromJson?_toJson a (NonNullJson.toJson_ne_null a)⟩
+
+instance : NonNullJson Number := ⟨fun _ => nofun⟩
+instance : NonNullJson Bool := ⟨fun _ => nofun⟩
+instance : NonNullJson String := ⟨fun _ => nofun⟩
+instance : NonNullJson Unit := ⟨fun _ => nofun⟩
+instance : NonNullJson Empty := ⟨nofun⟩
+instance : NonNullJson System.FilePath := ⟨fun _ => nofun⟩
+instance : NonNullJson Structured := ⟨fun | .arr _ => nofun | .obj _ => nofun⟩
+instance : NonNullJson (Fin n) := ⟨fun _ => nofun⟩
+instance : NonNullJson UInt8 := ⟨fun _ => nofun⟩
+instance : NonNullJson UInt16 := ⟨fun _ => nofun⟩
+instance : NonNullJson UInt32 := ⟨fun _ => nofun⟩
+instance : NonNullJson UInt64 := ⟨fun _ => nofun⟩
+instance : NonNullJson USize := ⟨fun _ => nofun⟩
+instance [ToJson α] : NonNullJson (Array α) := ⟨fun _ => nofun⟩
+instance [ToJson α] : NonNullJson (List α) := ⟨fun _ => nofun⟩
+instance [ToJson α] [ToJson β] : NonNullJson (α × β) := ⟨fun _ => nofun⟩
+
+/-! ## What a derived codec's proofs need
+
+A derived encoder builds an object as `mkObj (List.flatten parts)`, one part per field: a single
+pair, or `opt k v` for an optional field. Its decoder looks each key up with `getObjValD`. These
+say what that lookup finds, given that no other part carries the key, which the handler checks
+before it generates anything and the generated proof shows one pair of keys at a time.
+-/
+
+/--
+A field's part does not carry another field's key. A derived codec's proof needs this of every
+pair of fields, so it is stated for one part and one other key at a time, leaving only the
+inequality of two string literals to check.
+
+`k ∉ [(k', v)].map Prod.fst` says the part, the single pair under `k'`, has no pair under `k`.
+`h : k ≠ k'` is all it needs, the value playing no part.
+-/
+theorem not_mem_keys_single {k k' : String} {v : Json} (h : k ≠ k') :
+    k ∉ [(k', v)].map Prod.fst := by
+  simpa using h
+
+/--
+An optional field's part does not carry another field's key, whether or not the field is present.
+It is the counterpart of `not_mem_keys_single` for a part that may be empty.
+
+`k ∉ (opt k' o).map Prod.fst` says the part has no pair under `k`. When `o` is `none` the part is
+empty, and when it is `some v` it is the single pair under `k'`, so `h : k ≠ k'` covers both.
+-/
+theorem not_mem_keys_opt [ToJson α] {k k' : String} {o : Option α} (h : k ≠ k') :
+    k ∉ (opt k' o).map Prod.fst := by
+  cases o with
+  | none => simp [opt]
+  | some _ => simpa [opt] using h
+
+/--
+Looking up a field's key in an object built from parts finds the value its own part put there,
+whatever comes before it, as long as nothing after it carries the same key. It is the step
+`getObjValD_mkObj_get` takes once the parts are split around the field's.
+
+`pre` and `post` are the parts before and after the field's, `[(k, v)]`. `hpost` says no part in
+`post` has a pair under `k`; nothing is asked of `pre`, lookup taking the last field of a name. The
+conclusion is that `getObjValD` answers `v` itself, not the `null` it gives for a missing key.
+-/
+private theorem getObjValD_mkObj_field {pre post : List (List (String × Json))} {k : String}
+    {v : Json} (hpost : ∀ p ∈ post, k ∉ p.map Prod.fst) :
+    (mkObj (List.flatten (pre ++ [(k, v)] :: post))).getObjValD k = v := by
+  have hnone : findLast? (List.flatten post).toArray k = none := by
+    rw [findLast?_eq_none_iff]
+    simpa [fieldNames, List.mem_flatten] using hpost
+  simp only [mkObj, getObjValD, getObjVal?, List.flatten_append, List.flatten_cons,
+    ← List.append_assoc, ← List.append_toArray, findLast?_append, hnone, Option.none_or]
+  simp [findLast?]
+  rfl
+
+/--
+A list with an element at `i` is what comes before it, the element, and what comes after. It is
+what lets a lookup be stated by position, the parts before and after being read off the list
+rather than written out again.
+
+`h : l[i]? = some p` says `p` is at `i`, which also puts `i` in bounds. The conclusion splits `l`
+into `l.take i`, `p` and `l.drop (i + 1)`, so nothing is lost or repeated at the seams.
+-/
+private theorem eq_take_cons_drop {l : List α} {i : Nat} {p : α} (h : l[i]? = some p) :
+    l = l.take i ++ p :: l.drop (i + 1) := by
+  obtain ⟨hi, rfl⟩ := List.getElem?_eq_some_iff.1 h
+  rw [← List.drop_eq_getElem_cons hi, List.take_append_drop]
+
+/--
+Looking up a field's key in an object built from parts finds the value its own part put there, as
+long as no later part carries the same key. It is how a proof that a derived decoder reads back its
+encoder's output finds each field, the parts being those of the encoder and `i` the field's place.
+
+`hi : parts[i]? = some [(k, v)]` says the field's part is the single pair under `k`. `hpost` says no
+part after it has a pair under `k`; nothing is asked of the parts before, lookup taking the last
+field of a name. The conclusion is that `getObjValD` answers `v` itself, not the `null` it gives
+for a missing key.
+-/
+theorem getObjValD_mkObj_get {parts : List (List (String × Json))} {i : Nat} {k : String}
+    {v : Json} (hi : parts[i]? = some [(k, v)])
+    (hpost : ∀ p ∈ parts.drop (i + 1), k ∉ p.map Prod.fst) :
+    (mkObj parts.flatten).getObjValD k = v := by
+  rw [eq_take_cons_drop hi]
+  exact getObjValD_mkObj_field hpost
+
+/--
+Looking up an optional field's key in an object built from parts finds the encoding of the field,
+`null` when it is absent and the value's encoding when present, as long as no other part carries
+the key. It is what lets a derived decoder read an optional field back through `Option`'s decoder
+whether or not the encoder wrote it.
+
+`hi : parts[i]? = some (opt k o)` says the field's part is the optional one under `k`. `hpre` and
+`hpost` say no part before or after it has a pair under `k`; both are needed, since an absent field
+leaves lookup to fall through to the others. The conclusion is `toJson o`, which is `null` for
+`none` and `toJson v` for `some v`, the two answers the lookup gives.
+-/
+theorem getObjValD_mkObj_get_opt [ToJson α] {parts : List (List (String × Json))} {i : Nat}
+    {k : String} {o : Option α} (hi : parts[i]? = some (opt k o))
+    (hpre : ∀ p ∈ parts.take i, k ∉ p.map Prod.fst)
+    (hpost : ∀ p ∈ parts.drop (i + 1), k ∉ p.map Prod.fst) :
+    (mkObj parts.flatten).getObjValD k = toJson o := by
+  rw [eq_take_cons_drop hi]
+  generalize parts.take i = pre at hpre ⊢
+  generalize parts.drop (i + 1) = post at hpost ⊢
+  cases o with
+  | some v => exact getObjValD_mkObj_field hpost
+  | none =>
+    have hnone : findLast? (List.flatten (pre ++ post)).toArray k = none := by
+      rw [findLast?_eq_none_iff]
+      simp only [fieldNames, List.map_flatten, List.mem_flatten, List.map_append, List.mem_append,
+        List.mem_map, not_exists, not_and]
+      grind
+    simp [mkObj, getObjValD, getObjVal?, opt, List.flatten_append] at hnone ⊢
+    simp [hnone]
+    rfl
 
 end
 

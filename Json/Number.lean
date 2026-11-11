@@ -1114,6 +1114,40 @@ theorem toNat?_ofNat {n : Nat} {maxPadding : Nat}
     (ofNat n).toNat? maxPadding = some n := by
   simp [toNat?, ofNat, toInt?_ofInt h]
 
+/--
+A natural number below `10 ^ k` is written with an exponent of at most `k`. The exponent counts
+trailing zeros, which a number cannot have more of than it has digits, and this is what discharges
+the padding bound of `toNat?_ofNat` for every number of a bounded type at once.
+
+`h : n < 10 ^ k` says `n` has at most `k` digits, and the conclusion bounds the exponent of its
+canonical form by `k`. The proof reads `n` back as the mantissa times `10` to that exponent: a
+non-zero mantissa makes the power at most `n`, and a zero one makes `n` zero, written `⟨0, 0⟩`.
+-/
+theorem exponent_ofNat_le {n k : Nat} (h : n < 10 ^ k) : (ofNat n).exponent ≤ k := by
+  have hexp : 0 ≤ (normalize (n : Int) 0).exponent := by
+    unfold normalize
+    split
+    · simp
+    · exact le_exponent_normalizeAux _ 0
+  have hval : (normalize n 0).mantissa * 10 ^ (normalize n 0).exponent.toNat = n := by
+    have heqv := eqv_normalize n 0
+    simp only [Eqv, scaleTo, show min (normalize (n : Int) 0).exponent 0 = 0 by omega] at heqv
+    simpa using heqv
+  show (normalize (n : Int) 0).exponent ≤ k
+  by_cases hm : (normalize (n : Int) 0).mantissa = 0
+  · have hn : (n : Int) = 0 := by simpa [hm] using hval.symm
+    rw [hn]
+    simp [normalize]
+  · have habs := congrArg Int.natAbs hval
+    simp only [Int.natAbs_mul, Int.natAbs_pow, Int.natAbs_natCast] at habs
+    have hpos : 1 ≤ (normalize (n : Int) 0).mantissa.natAbs := by omega
+    have hle : 10 ^ (normalize (n : Int) 0).exponent.toNat ≤ n := by
+      calc 10 ^ _ = 1 * 10 ^ (normalize (n : Int) 0).exponent.toNat := by simp
+        _ ≤ _ := Nat.mul_le_mul_right _ hpos
+        _ = n := by simpa using habs
+    have := (Nat.pow_lt_pow_iff_right (by decide : 1 < 10)).1 (Nat.lt_of_le_of_lt hle h)
+    omega
+
 end Number
 
 end
