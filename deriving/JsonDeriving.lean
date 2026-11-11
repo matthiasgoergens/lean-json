@@ -5,5 +5,6 @@ Released under Apache 2.0 license as described in the file LICENSE.
 module
 
 public import JsonDeriving.Keys
+public import JsonDeriving.Enum
 public import JsonDeriving.FromTo
 public import JsonDeriving.Syntax

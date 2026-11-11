@@ -30,6 +30,31 @@ structure Only where
   second : Nat
 deriving ToJson, FromJson, BEq, Repr
 
+@[json_keys SCREAMING_SNAKE_CASE]
+structure Screaming where
+  parseURLText : Nat
+deriving ToJson, FromJson, BEq, Repr
+
+@[json_keys kebab-case]
+structure Kebab where
+  gPerMol : Nat
+  why_none : Nat
+deriving ToJson, FromJson, BEq, Repr
+
+@[json_keys camelCase]
+structure Camel where
+  why_none : Nat
+  parseURL : Nat
+deriving ToJson, FromJson, BEq, Repr
+
+/-- Underscores at the ends or doubled leave no empty word behind. -/
+@[json_keys camelCase]
+structure CamelEdges where
+  _x : Nat
+  y_ : Nat
+  a__b : Nat
+deriving ToJson, FromJson, BEq, Repr
+
 structure Plain where
   whyNone : Nat
 deriving ToJson, FromJson, BEq, Repr
@@ -88,6 +113,15 @@ def all : Array TestCase := #[
     "{\"notKnown\":1,\"bonds\":2,\"rests_on\":3}",
   encodesTo "an override without a convention leaves the other names as they are"
     ({ first := 1, second := 2 : Only }) "{\"first\":1,\"two\":2}",
+  encodesTo "SCREAMING_SNAKE_CASE keeps a run of capitals as one word"
+    ({ parseURLText := 1 : Screaming }) "{\"PARSE_URL_TEXT\":1}",
+  encodesTo "kebab-case splits at capitals and underscores"
+    ({ gPerMol := 1, why_none := 2 : Kebab }) "{\"g-per-mol\":1,\"why-none\":2}",
+  encodesTo "camelCase joins the words, capitalising all but the first"
+    ({ why_none := 1, parseURL := 2 : Camel }) "{\"whyNone\":1,\"parseUrl\":2}",
+  encodesTo "camelCase ignores underscores at the ends and doubled ones"
+    ({ _x := 1, y_ := 2, a__b := 3 : CamelEdges }) "{\"x\":1,\"y\":2,\"aB\":3}",
+  roundTrips "a structure under kebab-case" ({ gPerMol := 1, why_none := 2 : Kebab }),
   encodesTo "no configuration keeps the field names" ({ whyNone := 1 : Plain }) "{\"whyNone\":1}",
   roundTrips "a renamed structure" snake,
   roundTrips "a renamed structure with an optional field absent" { snake with gPerMol? := none },

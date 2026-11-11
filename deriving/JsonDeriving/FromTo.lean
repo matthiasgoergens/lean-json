@@ -6,6 +6,7 @@ module
 
 public import Json
 public import JsonDeriving.Keys
+public import JsonDeriving.Enum
 public meta import Lean.Elab.Deriving.Basic
 public meta import Lean.Elab.Deriving.Util
 public meta import Lean.Meta.StringLitProof
@@ -90,13 +91,7 @@ private meta def jsonFieldName (indName : Name) (n : Name) : TermElabM (Bool × 
   let .str .anonymous s := n | throwError "cannot derive a JSON codec for the field name {n}"
   let stripped := s.dropEndWhile (· == '?') |>.copy
   let naming := keyNaming (← getEnv) indName
-  let key :=
-    match naming.overrides.find? (·.1 == n) with
-    | some (_, key) => key
-    | none =>
-      match naming.convention with
-      | some convention => convention.apply stripped
-      | none => stripped
+  let key := naming.apply n stripped
   return (s != stripped, Lean.quote key)
 
 /-- Two fields under one key would make an object that reads back as something else. -/
@@ -276,7 +271,8 @@ and a `LawfulJson` instance when every field type has one. The proof finds each 
 in the encoded object and rewrites the decoder with what it finds. A structure gets neither when a
 field's type depends on another field's value, which defeats rewriting under the decoder's
 binders, or when it has an instance parameter, which the generated binders cannot supply; nor
-does an inductive type with constructors, whose proof would have to follow the tag dispatch.
+does an inductive type with constructors, whose proof would have to follow the tag dispatch,
+unless it is an enumeration, whose round trip `JsonDeriving.Enum` proves.
 -/
 
 /--
@@ -328,6 +324,8 @@ private meta def hasLawful (type : Expr) : TermElabM Bool := do
 
 open TSyntax.Compat in
 private meta def mkRoundTripCmds (declName fromAux : Name) : TermElabM (Array Command) := do
+  if let some members ← enumMembers? declName then
+    return ← mkEnumRoundTripCmds declName members
   let env ← getEnv
   let indVal ← getConstInfoInduct declName
   if !isStructure env declName || indVal.isRec then return #[]
@@ -431,6 +429,10 @@ private meta def mkToJsonCmds (declName : Name) : TermElabM (Array Command × Id
   let ctx ← mkContext ``_root_.Json.ToJson "toJson" declName
   let indVal ← theOnlyType ctx declName
   let aux := mkIdent ctx.auxFunNames[0]!
+  if let some members ← enumMembers? declName then
+    let (pre, post) ← mkEnumToJsonCmds declName members aux
+    let instCmds ← mkInstanceCmds ctx ``_root_.Json.ToJson #[declName]
+    return (pre ++ instCmds ++ post, aux)
   let header ← mkHeader ``_root_.Json.ToJson 1 indVal
   let binders := header.binders
   let body ← Term.elabBinders binders fun _ => do
@@ -455,6 +457,10 @@ private meta def mkFromJsonCmds (declName : Name) : TermElabM (Array Command × 
   let ctx ← mkContext ``_root_.Json.FromJson "fromJson" declName
   let indVal ← theOnlyType ctx declName
   let aux := mkIdent ctx.auxFunNames[0]!
+  if let some members ← enumMembers? declName then
+    let cmds ← mkEnumFromJsonCmds declName members aux
+    let instCmds ← mkInstanceCmds ctx ``_root_.Json.FromJson #[declName]
+    return (cmds ++ instCmds, aux)
   let header ← mkHeader ``_root_.Json.FromJson 0 indVal
   -- Only a recursive type needs the count, and computing the depth to seed it is a traversal of
   -- its own, so a decoder that cannot recurse does not carry one.
@@ -506,10 +512,15 @@ private meta def addRoundTrip (cls declName : Name) (aux : Ident) : CommandElabM
     if (derivedCodec? env ``_root_.Json.ToJson declName).isSome then
       (← liftTermElabM <| mkRoundTripCmds declName fromAux).forM elabCommand
 
+private meta def recordIfEnum (declName : Name) : CommandElabM Unit := do
+  if let some members ← liftTermElabM <| enumMembers? declName then
+    recordEnum declName members
+
 meta def toJsonHandler (declNames : Array Name) : CommandElabM Bool := do
   if declNames.size == 1 && (← isInductive declNames[0]!) then
     let (cmds, aux) ← liftTermElabM <| mkToJsonCmds declNames[0]!
     cmds.forM elabCommand
+    recordIfEnum declNames[0]!
     addRoundTrip ``_root_.Json.ToJson declNames[0]! aux
     return true
   else
@@ -519,6 +530,7 @@ meta def fromJsonHandler (declNames : Array Name) : CommandElabM Bool := do
   if declNames.size == 1 && (← isInductive declNames[0]!) then
     let (cmds, aux) ← liftTermElabM <| mkFromJsonCmds declNames[0]!
     cmds.forM elabCommand
+    recordIfEnum declNames[0]!
     addRoundTrip ``_root_.Json.FromJson declNames[0]! aux
     return true
   else
