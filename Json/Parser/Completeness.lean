@@ -558,39 +558,6 @@ theorem escapeHex4?_complete {p : s.Pos} {l : List Char} {v : Nat} {t : List Cha
   · next hc => exact (hc q hq).elim
 
 /--
-An unescaped character is read as itself. It is the commonest case by far, and the only one that
-consumes a single character.
-
-`hs` says `c` is the character at `p` and `hu` says it satisfies `isUnescaped`. The conclusion
-`stringStep p = .char c q` fixes the machine's answer exactly. The earlier branches, which test
-for `'"'` and `'\\'`, are excluded because `isUnescaped` holds of neither.
--/
-theorem stringStep_unescaped {p q : s.Pos} {c : Char} (hs : step? p = some (c, q))
-    (hu : Spec.isUnescaped c = true) : stringStep p = .char c q := by
-  rw [stringStep]
-  split
-  · next hc => rw [hs] at hc; exact absurd hc (by simp)
-  · next w hc =>
-    rw [hs] at hc
-    injection hc with hc'
-    injection hc' with hcc
-    rw [hcc] at hu
-    exact absurd hu (by decide)
-  · next w hc =>
-    rw [hs] at hc
-    injection hc with hc'
-    injection hc' with hcc
-    rw [hcc] at hu
-    exact absurd hu (by decide)
-  · next c' w hc =>
-    rw [hs] at hc
-    injection hc with hc'
-    injection hc' with hcc hww
-    subst hcc
-    subst hww
-    rw [ite_eq_left hu]
-
-/--
 A two-character escape is read as the character it stands for. There are eight of them and the
 scanner disposes of all eight through one function, so one lemma covers them together.
 
