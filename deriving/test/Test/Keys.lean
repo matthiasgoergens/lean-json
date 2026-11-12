@@ -59,6 +59,36 @@ structure Plain where
   whyNone : Nat
 deriving ToJson, FromJson, BEq, Repr
 
+@[json_keys snake_case strict (notKnown := "nk")]
+structure Strict where
+  whyNone : String
+  notKnown : UInt8
+  perOption? : Option UInt8
+deriving ToJson, FromJson, BEq, Repr
+
+@[json_keys strict]
+structure StrictEmpty where
+deriving ToJson, FromJson, BEq, Repr
+
+@[json_keys strict]
+private structure StrictPrivate where
+  a : UInt8
+deriving ToJson, FromJson, BEq, Repr
+
+@[json_keys strict]
+structure StrictOuter where
+  inner : Array Strict
+deriving ToJson, FromJson
+
+example : LawfulJson Strict := inferInstance
+example : LawfulJson StrictEmpty := inferInstance
+
+/-- error: Test.Keys.NotAStructure has no field strict -/
+#guard_msgs in
+@[json_keys (strict := "x")]
+structure NotAStructure where
+  here : Nat
+
 /-- error: cannot derive a JSON codec for Test.Keys.Clash: the fields oneTwo and one_two would both be written as "one_two" -/
 #guard_msgs in
 @[json_keys snake_case]
@@ -104,6 +134,19 @@ private def snake : Snake := { whyNone := "w", perOption := #[1], gPerMol? := so
 private def snakeText : String :=
   "{\"why_none\":\"w\",\"per_option\":[1],\"g_per_mol\":2,\"url\":\"u\"}"
 
+private def decode (α : Type) [FromJson α] (text : String) : Except String α :=
+  match Json.parse text with
+  | .error e => .error s!"the text did not parse: {e}"
+  | .ok j => fromJson? j
+
+/-- The message the decoder of `α` refuses `text` with. -/
+private def refusalOf (α : Type) [FromJson α] (text : String) : Option String :=
+  match decode α text with
+  | .error e => some e
+  | .ok _ => none
+
+private def strict : Strict := { whyNone := "w", notKnown := 1, perOption? := some 2 }
+
 def all : Array TestCase := #[
   encodesTo "snake_case renames every field, in field order" snake snakeText,
   encodesTo "an absent optional field is still left out"
@@ -131,7 +174,27 @@ def all : Array TestCase := #[
     "{\"whyNone\":\"w\",\"perOption\":[1],\"gPerMol\":2,\"url\":\"u\"}",
   refuses "the convention's name is not accepted where an override replaced it" Mixed
     "{\"bondedTo\":2,\"notKnown\":1,\"rests_on\":3}",
-  refuses "the renamed key is not accepted where nothing renames" Plain "{\"why_none\":1}"
+  refuses "the renamed key is not accepted where nothing renames" Plain "{\"why_none\":1}",
+  expect "a strict decoder refuses a key it does not know, naming the type and the key"
+    ((refusalOf Strict "{\"why_none\":\"w\",\"nk\":1,\"per_options\":2}").any fun e =>
+      (e.splitOn "Test.Keys.Strict").length > 1 && (e.splitOn "\"per_options\"").length > 1),
+  refuses "a strict decoder refuses the Lean name a key replaced" Strict
+    "{\"why_none\":\"w\",\"nk\":1,\"notKnown\":1}",
+  refuses "a strict structure with no fields refuses any key" StrictEmpty "{\"x\":null}",
+  expect "a strict decoder names a private structure by the name its source gives it"
+    ((refusalOf StrictPrivate "{\"a\":1,\"b\":1}").any fun e =>
+      (e.splitOn "Test.Keys.StrictPrivate").length > 1 && (e.splitOn "_private").length == 1),
+  refuses "a strict decoder refuses an unknown key in a nested value" StrictOuter
+    "{\"inner\":[{\"why_none\":\"w\",\"nk\":1,\"x\":1}]}",
+  roundTrips "a strict structure with every key" strict,
+  roundTrips "a strict structure with its optional field absent" { strict with perOption? := none },
+  roundTrips "a strict structure with no fields" ({} : StrictEmpty),
+  -- The parser refuses repeated names by default, so the object is built rather than parsed.
+  expect "a strict decoder takes the last of a repeated known key, as lookup does"
+    ((fromJson? (α := Strict) (.obj #[("why_none", "v"), ("nk", 1), ("why_none", "w"),
+      ("per_option", 2)])).toOption == some strict),
+  expect "a decoder without strict ignores a key it does not know"
+    ((decode Plain "{\"whyNone\":1,\"extra\":2}").toOption == some { whyNone := 1 })
 ]
 
 end Test.Keys
