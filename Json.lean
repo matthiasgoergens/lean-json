@@ -17,6 +17,7 @@ public import Json.Parser
 public import Json.Printer
 public import Json.FromTo
 public import Json.Enum
+public import Json.Strict
 public import Json.Query
 public import Json.Parser.Soundness
 public import Json.Parser.UniqueKeys

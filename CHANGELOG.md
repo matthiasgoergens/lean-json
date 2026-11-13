@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* `@[json_keys strict]` makes a structure's derived decoder refuse a key its encoder does not write, and keeps the derived round trip
 * `@[json_keys]` on a structure renames the JSON keys of its derived codecs, by a convention (`snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `camelCase`) and per field
 * `LawfulJson`, a class for codecs that round trip, with instances for the built-in types where the round trip holds unconditionally
 * Codecs for `UInt8`, `UInt16`, `UInt32` and `Fin n`, as numbers refused out of range, and a proved round trip for them and for `UInt64` and `USize`

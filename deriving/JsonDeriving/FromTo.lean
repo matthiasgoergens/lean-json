@@ -105,6 +105,16 @@ private meta def checkKeysDistinct (indName : Name) (fields : Array Name) : Term
         throwError "cannot derive a JSON codec for {indName}: the fields {other} and \
 {keys[i].1} would both be written as \"{key}\""
 
+/--
+The name a strict decoder reports and the list of keys it knows, which are the keys its encoder
+writes, or `none` for a structure without `strict`.
+-/
+private meta def strictKeys? (indName : Name) (fields : Array Name) :
+    TermElabM (Option (Term × Term)) := do
+  unless (keyNaming (← getEnv) indName).strict do return none
+  let keys ← fields.mapM fun field => return (← jsonFieldName indName field).2
+  return some (Lean.quote (toString (privateToUserName indName)), ← `([$keys,*]))
+
 private meta def theOnlyType (ctx : Deriving.Context) (indName : Name) :
     TermElabM InductiveVal := do
   match ctx.typeInfos[0]?, ctx.typeInfos.size == 1 with
@@ -210,9 +220,16 @@ private meta def mkFromJsonBodyForStruct (indName : Name) (aux : Ident) (fuel : 
     let label := Lean.quote s!"{indName}.{field}: "
     `(doElem| Except.mapError (fun s => $label ++ s) <| $decoded)
   let names := fields.map mkIdent
-  `(do
-    $[let $names:ident ← $getters]*
-    return { $[$names:ident := $(id names)],* })
+  match ← strictKeys? indName fields with
+  | some (typeName, known) =>
+    `(do
+      _root_.Json.checkKnownKeys $typeName $known $json
+      $[let $names:ident ← $getters]*
+      return { $[$names:ident := $(id names)],* })
+  | none =>
+    `(do
+      $[let $names:ident ← $getters]*
+      return { $[$names:ident := $(id names)],* })
 
 private meta def mkFromJsonBodyForInduct (indVal : InductiveVal) (aux : Ident) (fuel : Ident)
     (json : Ident) : TermElabM Term := do
@@ -395,14 +412,26 @@ private meta def mkRoundTripCmds (declName fromAux : Name) : TermElabM (Array Co
         `(_root_.Json.getObjValD_mkObj_get (i := $(quote i)) rfl $after)
     `(tactic| have $name:ident : (_root_.Json.ToJson.toJson $x).getObjValD $key =
         _root_.Json.ToJson.toJson ($x).$f:ident := $lemma)
+  -- A strict decoder's check passes on the encoder's output, which is shown by matching each part
+  -- with its key, a step per field that compares no strings.
+  let strictCheck ← match ← strictKeys? declName fields with
+    | none => pure #[]
+    | some (typeName, known) =>
+      let keyed ← keys.foldrM (init := ← `(_root_.Json.PartsKeyed.nil)) fun (isOptional, _) rest =>
+        if isOptional then `(_root_.Json.PartsKeyed.cons _root_.Json.keyed_opt $rest)
+        else `(_root_.Json.PartsKeyed.cons _root_.Json.keyed_single $rest)
+      let name := mkIdent (← mkFreshUserName `known)
+      pure #[(name, ← `(tactic| have $name:ident : _root_.Json.checkKnownKeys $typeName $known
+          (_root_.Json.ToJson.toJson $x) = Except.ok () := _root_.Json.checkKnownKeys_mkObj $keyed))]
   let fromAux := mkIdent (`_root_ ++ fromAux)
   let unfolded ← `(tactic|
     (show $fromAux (_root_.Json.ToJson.toJson $x) = _; unfold $fromAux:ident))
   -- `rw` rather than `simp`: each rule is closed, so one abstraction each finds it under the
   -- decoder's binders, where `simp` would revisit every binder for every rule.
-  let rules := lookupNames ++ fields.map mkIdent
-  let rewrite ← if fields.isEmpty then pure #[] else pure #[← `(tactic| rw [$[$rules:term],*])]
-  let tactics := lookups ++ #[unfolded] ++ rewrite ++ #[← `(tactic| rfl)]
+  let rules := strictCheck.map Prod.fst ++ lookupNames ++ fields.map mkIdent
+  let rewrite ← if rules.isEmpty then pure #[] else pure #[← `(tactic| rw [$[$rules:term],*])]
+  let tactics := strictCheck.map Prod.snd ++ lookups ++ #[unfolded] ++ rewrite ++
+    #[← `(tactic| rfl)]
   let name := privateToUserName declName |>.str "fromJson?_toJson"
   let thm := mkIdent (`_root_ ++ name)
   let visibility ← if isPrivateName declName then

@@ -81,6 +81,8 @@ meta structure KeyNaming where
   convention : Option KeyCase := none
   /-- Lean name and the whole of its string, which no convention applies to. -/
   overrides : Array (Name × String) := #[]
+  /-- Whether the decoder refuses a key the encoder does not write; only `json_keys` sets it. -/
+  strict : Bool := false
 deriving Inhabited
 
 /-- The string of a field or constructor named `s`: its override, else the convention's. -/
@@ -93,11 +95,12 @@ meta def KeyNaming.apply (naming : KeyNaming) (n : Name) (s : String) : String :
     | none => s
 
 /--
-`@[json_keys snake_case (whyNone := "why_none")]` on a structure names the keys of its derived
-`ToJson` and `FromJson`: by a convention, with the listed fields overriding it. Both parts are
-optional. A field keeps its name, minus any trailing `?`, where neither applies.
+`@[json_keys snake_case strict (whyNone := "why_none")]` on a structure names the keys of its
+derived `ToJson` and `FromJson`: by a convention, with the listed fields overriding it. A field
+keeps its name, minus any trailing `?`, where neither applies. `strict` makes the decoder refuse an
+object holding a key the encoder does not write. Every part is optional.
 -/
-syntax (name := jsonKeys) "json_keys" (ppSpace jsonCase)?
+syntax (name := jsonKeys) "json_keys" (ppSpace jsonCase)? (ppSpace &"strict")?
   (ppSpace "(" ident " := " str ")")* : attr
 
 /--
@@ -111,11 +114,11 @@ syntax (name := jsonEnum) "json_enum" (ppSpace jsonCase)?
   (ppSpace "(" ident " := " str ")")* : attr
 
 /-- The convention and overrides of either attribute, checking each name with `known`. -/
-private meta def parseNaming (stx : Syntax) (noun what : String) (known : Name → Bool) :
-    AttrM KeyNaming := do
-  let convention := if stx[1].isNone then none else some (KeyCase.ofSyntax stx[1][0])
+private meta def parseNaming (convention pairs : Syntax) (noun what : String)
+    (known : Name → Bool) : AttrM KeyNaming := do
+  let convention := if convention.isNone then none else some (KeyCase.ofSyntax convention[0])
   let mut overrides := #[]
-  for pair in stx[2].getArgs do
+  for pair in pairs.getArgs do
     let n := pair[1].getId
     unless known n do
       throwErrorAt pair[1] "{what} {n}"
@@ -132,7 +135,8 @@ private meta initialize keyNamingAttr : ParametricAttribute KeyNaming ←
       unless isStructure (← getEnv) declName do
         throwError "json_keys applies to structures, and {declName} is not one"
       let fields := getStructureFields (← getEnv) declName
-      parseNaming stx "key" s!"{declName} has no field" fields.contains
+      let naming ← parseNaming stx[1] stx[3] "key" s!"{declName} has no field" fields.contains
+      return { naming with strict := !stx[2].isNone }
   }
 
 private meta initialize enumNamingAttr : ParametricAttribute KeyNaming ←
@@ -146,7 +150,7 @@ private meta initialize enumNamingAttr : ParametricAttribute KeyNaming ←
       if isStructure env declName then
         throwError "json_enum applies to inductive types other than structures; \
 {declName} is a structure, whose keys json_keys names"
-      parseNaming stx "string" s!"{declName} has no constructor"
+      parseNaming stx[1] stx[2] "string" s!"{declName} has no constructor"
         fun n => info.ctors.any (·.componentsRev.head? == n.componentsRev.head? && n.isAtomic)
   }
 
